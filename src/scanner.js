@@ -3,8 +3,12 @@ import { join, extname } from "node:path";
 
 /**
  * Walk a directory recursively and return all .md file paths.
+ * @param {string} rootDir - Starting directory
+ * @param {Object} [opts] - Options
+ * @param {number} [opts.maxSize] - Skip files larger than this (bytes)
  */
-export async function scanDirectory(rootDir) {
+export async function scanDirectory(rootDir, opts = {}) {
+  const { maxSize } = opts;
   const results = [];
 
   async function walk(dir) {
@@ -15,6 +19,7 @@ export async function scanDirectory(rootDir) {
         await walk(fullPath);
       } else if (entry.isFile() && extname(entry.name) === ".md") {
         const s = await stat(fullPath);
+        if (maxSize && s.size > maxSize) continue;
         results.push({ path: fullPath, mtimeMs: s.mtimeMs, size: s.size });
       }
     }

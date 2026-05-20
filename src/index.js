@@ -16,9 +16,10 @@ program
   .command("scan")
   .description("Scan a directory and build the search index")
   .argument("<dir>", "directory containing markdown files")
-  .action(async (dir) => {
+  .option("--max-size <bytes>", "skip files larger than this size")
+  .action(async (dir, opts) => {
     console.log(`Scanning ${dir}...`);
-    const files = await scanDirectory(dir);
+    const files = await scanDirectory(dir, { maxSize: opts.maxSize ? parseInt(opts.maxSize) : undefined });
     console.log(`Found ${files.length} markdown files.`);
 
     const { index } = await buildIndex(files);
@@ -30,8 +31,9 @@ program
   .description("Search indexed documents")
   .argument("<dir>", "directory containing markdown files")
   .argument("<query>", "search query")
-  .action(async (dir, query) => {
-    const files = await scanDirectory(dir);
+  .option("--max-size <bytes>", "skip files larger than this size")
+  .action(async (dir, query, opts) => {
+    const files = await scanDirectory(dir, { maxSize: opts.maxSize ? parseInt(opts.maxSize) : undefined });
     const { index, bodies } = await buildIndex(files);
     const results = search(index, bodies, query);
 
@@ -53,8 +55,9 @@ program
   .description("Start the web search UI")
   .argument("<dir>", "directory containing markdown files")
   .option("-p, --port <port>", "port to listen on", "3000")
+  .option("--max-size <bytes>", "skip files larger than this size")
   .action(async (dir, opts) => {
-    const files = await scanDirectory(dir);
+    const files = await scanDirectory(dir, { maxSize: opts.maxSize ? parseInt(opts.maxSize) : undefined });
     const { index, bodies } = await buildIndex(files);
     console.log(`Indexed ${index.documentCount} documents.`);
     startServer(index, bodies, parseInt(opts.port));
