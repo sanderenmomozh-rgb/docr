@@ -19,7 +19,7 @@ export async function scanDirectory(rootDir, opts = {}) {
         await walk(fullPath);
       } else if (entry.isFile() && extname(entry.name) === ".md") {
         const s = await stat(fullPath);
-        if (maxSize && s.size > maxSize) continue;
+        if (maxSize != null && s.size > maxSize) continue;
         results.push({ path: fullPath, mtimeMs: s.mtimeMs, size: s.size });
       }
     }
