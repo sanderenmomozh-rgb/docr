@@ -1,0 +1,30 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node -e \"process.stdin.on('data',d=>{const j=JSON.parse(d);const f=j.tool_input?.file_path||j.tool_response?.filePath||'';console.log(f)})\" | grep -E '\\.js$' && npm test || true"
+          }
+        ]
+      }
+    ]
+  },
+  "permissions": {
+    "allow": [
+      "Bash(npm *)",
+      "Bash(node *)",
+      "Bash(git *)"
+    ],
+    "deny": [
+      "Bash(rm -rf *)",
+      "Bash(git push --force *)",
+      "Bash(git reset --hard *)",
+      "Bash(sudo *)",
+      "Bash(curl * | bash)",
+      "Bash(wget * -O - | sh)"
+    ]
+  }
+}
