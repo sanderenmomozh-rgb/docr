@@ -7,7 +7,7 @@ export function search(index, bodies, query) {
 
   return raw.slice(0, 20).map((r) => ({
     ...r,
-    snippet: makeSnippet(bodies.get(r.id) || "", query),
+    snippet: makeSnippet(bodies.get(r.id)?.body || "", query),
   }));
 }
 

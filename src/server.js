@@ -48,7 +48,7 @@ export function startServer(index, bodies, port = 3000) {
       if (!q.trim()) return res.json([]);
       const raw = index.search(q.trim());
       const results = raw.slice(0, 20).map((r) => {
-        const body = bodies.get(r.id) || "";
+        const body = bodies.get(r.id)?.body || "";
         const idx = body.toLowerCase().indexOf(q.toLowerCase());
         const start = Math.max(0, (idx >= 0 ? idx : 0) - 60);
         const snippet = body.slice(start, start + 200).replace(/\n/g, " ");

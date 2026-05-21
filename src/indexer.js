@@ -3,11 +3,23 @@ import { basename } from "node:path";
 import matter from "gray-matter";
 import MiniSearch from "minisearch";
 
+function normalizeTags(tags) {
+  if (!tags) return [];
+  if (Array.isArray(tags)) return tags;
+  if (typeof tags === "string") return [tags];
+  return [];
+}
+
+function normalizeAliases(aliases) {
+  if (!aliases) return [];
+  if (Array.isArray(aliases)) return aliases;
+  if (typeof aliases === "string") return [aliases];
+  return [];
+}
+
 /**
  * Build a search index from a list of { path, mtimeMs, size } entries.
- * Each .md file is parsed for YAML frontmatter (title, tags, date).
- * The body is stored for full-text search; frontmatter fields are
- * indexed as separate searchable fields.
+ * Each .md file is parsed for YAML frontmatter.
  */
 export async function buildIndex(fileEntries) {
   const documents = [];
@@ -17,13 +29,20 @@ export async function buildIndex(fileEntries) {
       const raw = await readFile(entry.path, "utf-8");
       const { data, content } = matter(raw);
 
+      const title = data.title || basename(entry.path, ".md");
+      const tags = normalizeTags(data.tags);
+      const aliases = normalizeAliases(data.aliases);
+      const date = data.date || data.created || null;
+
       documents.push({
         id: entry.path,
         path: entry.path,
         filename: basename(entry.path),
-        title: data.title || basename(entry.path, ".md"),
-        tags: data.tags || [],
-        date: data.date || null,
+        title,
+        tags,
+        aliases,
+        date,
+        modified: data.modified || null,
         body: content,
         mtimeMs: entry.mtimeMs,
         size: entry.size,
@@ -34,17 +53,22 @@ export async function buildIndex(fileEntries) {
   }
 
   const miniSearch = new MiniSearch({
-    fields: ["title", "tags", "body"],
-    storeFields: ["path", "filename", "title", "tags", "date", "mtimeMs"],
+    fields: ["title", "aliases", "tags", "body"],
+    storeFields: [
+      "path", "filename", "title", "tags", "aliases", "date",
+      "modified", "mtimeMs",
+    ],
     searchOptions: {
-      boost: { title: 3, tags: 2, body: 1 },
+      boost: { title: 3, aliases: 2, tags: 2, body: 1 },
       prefix: true,
     },
   });
 
   miniSearch.addAll(documents);
 
-  const bodies = new Map(documents.map((d) => [d.path, d.body]));
+  const bodies = new Map(
+    documents.map((d) => [d.path, { body: d.body, frontmatter: { title: d.title, tags: d.tags, aliases: d.aliases, date: d.date, modified: d.modified } }])
+  );
 
   return { index: miniSearch, bodies };
 }
