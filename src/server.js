@@ -4,7 +4,7 @@ import express from "express";
  * Start a simple web UI for browsing and searching indexed docs.
  * Expects an already-built MiniSearch index.
  */
-export function startServer(index, bodies, port = 3000) {
+export function startServer(index, bodies, port = 3000, files = []) {
   const app = express();
 
   app.get("/", (_req, res) => {
@@ -63,6 +63,17 @@ export function startServer(index, bodies, port = 3000) {
     } catch (err) {
       console.error(`Search error: ${err.message}`);
       res.status(500).json({ error: "Search failed" });
+    }
+  });
+
+  app.get("/stats", async (_req, res) => {
+    try {
+      const { computeDashboard } = await import("./dashboard.js");
+      const dash = await computeDashboard(index, bodies, files);
+      res.json(dash);
+    } catch (err) {
+      console.error(`Stats error: ${err.message}`);
+      res.status(500).json({ error: "Stats failed" });
     }
   });
 
