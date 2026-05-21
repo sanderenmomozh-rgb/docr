@@ -13,20 +13,24 @@ export async function buildIndex(fileEntries) {
   const documents = [];
 
   for (const entry of fileEntries) {
-    const raw = await readFile(entry.path, "utf-8");
-    const { data, content } = matter(raw);
+    try {
+      const raw = await readFile(entry.path, "utf-8");
+      const { data, content } = matter(raw);
 
-    documents.push({
-      id: entry.path,
-      path: entry.path,
-      filename: basename(entry.path),
-      title: data.title || basename(entry.path, ".md"),
-      tags: data.tags || [],
-      date: data.date || null,
-      body: content,
-      mtimeMs: entry.mtimeMs,
-      size: entry.size,
-    });
+      documents.push({
+        id: entry.path,
+        path: entry.path,
+        filename: basename(entry.path),
+        title: data.title || basename(entry.path, ".md"),
+        tags: data.tags || [],
+        date: data.date || null,
+        body: content,
+        mtimeMs: entry.mtimeMs,
+        size: entry.size,
+      });
+    } catch (err) {
+      console.error(`Error indexing ${entry.path}: ${err.message}`);
+    }
   }
 
   const miniSearch = new MiniSearch({

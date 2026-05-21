@@ -4,6 +4,7 @@ import { scanDirectory } from "./scanner.js";
 import { buildIndex } from "./indexer.js";
 import { search } from "./search.js";
 import { startServer } from "./server.js";
+import { saveIndex, loadIndex, isCacheValid } from "./store.js";
 
 const program = new Command();
 
@@ -12,18 +13,34 @@ program
   .description("Organize and search your personal markdown notes")
   .version("1.0.0");
 
+async function getOrBuildIndex(dir, opts = {}) {
+  if (!opts.force && await isCacheValid(dir)) {
+    const cached = await loadIndex(dir);
+    if (cached) return cached;
+  }
+  const scanOpts = {};
+  if (opts.maxSize) scanOpts.maxSize = parseInt(opts.maxSize);
+  const files = await scanDirectory(dir, scanOpts);
+  const { index, bodies } = await buildIndex(files);
+  await saveIndex(index, bodies, dir, files.length);
+  return { index, bodies, fileCount: files.length };
+}
+
 program
   .command("scan")
   .description("Scan a directory and build the search index")
   .argument("<dir>", "directory containing markdown files")
   .option("--max-size <bytes>", "skip files larger than this size")
+  .option("--force", "rebuild index even if cache is valid")
   .action(async (dir, opts) => {
-    console.log(`Scanning ${dir}...`);
-    const files = await scanDirectory(dir, { maxSize: opts.maxSize ? parseInt(opts.maxSize) : undefined });
-    console.log(`Found ${files.length} markdown files.`);
-
-    const { index } = await buildIndex(files);
-    console.log(`Indexed ${index.documentCount} documents.`);
+    try {
+      const { index, fileCount } = await getOrBuildIndex(dir, opts);
+      console.log(`Found ${fileCount} markdown files.`);
+      console.log(`Indexed ${index.documentCount} documents.`);
+    } catch (err) {
+      console.error(`Error: ${err.message}`);
+      process.exit(1);
+    }
   });
 
 program
@@ -32,21 +49,26 @@ program
   .argument("<dir>", "directory containing markdown files")
   .argument("<query>", "search query")
   .option("--max-size <bytes>", "skip files larger than this size")
+  .option("--force", "rebuild index even if cache is valid")
   .action(async (dir, query, opts) => {
-    const files = await scanDirectory(dir, { maxSize: opts.maxSize ? parseInt(opts.maxSize) : undefined });
-    const { index, bodies } = await buildIndex(files);
-    const results = search(index, bodies, query);
+    try {
+      const { index, bodies } = await getOrBuildIndex(dir, opts);
+      const results = search(index, bodies, query);
 
-    if (results.length === 0) {
-      console.log("No matches found.");
-      return;
-    }
+      if (results.length === 0) {
+        console.log("No matches found.");
+        return;
+      }
 
-    for (const r of results) {
-      console.log(`\n── ${r.title} ──`);
-      console.log(`   file : ${r.filename}`);
-      if (r.tags.length) console.log(`   tags : ${r.tags.join(", ")}`);
-      console.log(`   ${r.snippet}`);
+      for (const r of results) {
+        console.log(`\n── ${r.title} ──`);
+        console.log(`   file : ${r.filename}`);
+        if (r.tags.length) console.log(`   tags : ${r.tags.join(", ")}`);
+        console.log(`   ${r.snippet}`);
+      }
+    } catch (err) {
+      console.error(`Error: ${err.message}`);
+      process.exit(1);
     }
   });
 
@@ -56,11 +78,16 @@ program
   .argument("<dir>", "directory containing markdown files")
   .option("-p, --port <port>", "port to listen on", "3000")
   .option("--max-size <bytes>", "skip files larger than this size")
+  .option("--force", "rebuild index even if cache is valid")
   .action(async (dir, opts) => {
-    const files = await scanDirectory(dir, { maxSize: opts.maxSize ? parseInt(opts.maxSize) : undefined });
-    const { index, bodies } = await buildIndex(files);
-    console.log(`Indexed ${index.documentCount} documents.`);
-    startServer(index, bodies, parseInt(opts.port));
+    try {
+      const { index, bodies } = await getOrBuildIndex(dir, opts);
+      console.log(`Indexed ${index.documentCount} documents.`);
+      startServer(index, bodies, parseInt(opts.port));
+    } catch (err) {
+      console.error(`Error: ${err.message}`);
+      process.exit(1);
+    }
   });
 
 program.parse();

@@ -12,15 +12,25 @@ export async function scanDirectory(rootDir, opts = {}) {
   const results = [];
 
   async function walk(dir) {
-    const entries = await readdir(dir, { withFileTypes: true });
+    let entries;
+    try {
+      entries = await readdir(dir, { withFileTypes: true });
+    } catch (err) {
+      console.error(`Error reading directory ${dir}: ${err.message}`);
+      return;
+    }
     for (const entry of entries) {
       const fullPath = join(dir, entry.name);
       if (entry.isDirectory() && !entry.name.startsWith(".")) {
         await walk(fullPath);
       } else if (entry.isFile() && extname(entry.name) === ".md") {
-        const s = await stat(fullPath);
-        if (maxSize != null && s.size > maxSize) continue;
-        results.push({ path: fullPath, mtimeMs: s.mtimeMs, size: s.size });
+        try {
+          const s = await stat(fullPath);
+          if (maxSize != null && s.size > maxSize) continue;
+          results.push({ path: fullPath, mtimeMs: s.mtimeMs, size: s.size });
+        } catch (err) {
+          console.error(`Error reading file ${fullPath}: ${err.message}`);
+        }
       }
     }
   }

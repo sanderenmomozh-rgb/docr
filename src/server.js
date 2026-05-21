@@ -43,25 +43,41 @@ export function startServer(index, bodies, port = 3000) {
   });
 
   app.get("/search", (req, res) => {
-    const q = req.query.q || "";
-    if (!q.trim()) return res.json([]);
-    const raw = index.search(q.trim());
-    const results = raw.slice(0, 20).map((r) => {
-      const body = bodies.get(r.id) || "";
-      const idx = body.toLowerCase().indexOf(q.toLowerCase());
-      const start = Math.max(0, (idx >= 0 ? idx : 0) - 60);
-      const snippet = body.slice(start, start + 200).replace(/\n/g, " ");
-      return {
-        title: doc?.title || r.id,
-        filename: doc?.filename || "",
-        tags: doc?.tags || [],
-        snippet: snippet + (body.length > start + 200 ? "..." : ""),
-      };
-    });
-    res.json(results);
+    try {
+      const q = req.query.q || "";
+      if (!q.trim()) return res.json([]);
+      const raw = index.search(q.trim());
+      const results = raw.slice(0, 20).map((r) => {
+        const body = bodies.get(r.id) || "";
+        const idx = body.toLowerCase().indexOf(q.toLowerCase());
+        const start = Math.max(0, (idx >= 0 ? idx : 0) - 60);
+        const snippet = body.slice(start, start + 200).replace(/\n/g, " ");
+        return {
+          title: r.title || r.id,
+          filename: r.filename || "",
+          tags: r.tags || [],
+          snippet: snippet + (body.length > start + 200 ? "..." : ""),
+        };
+      });
+      res.json(results);
+    } catch (err) {
+      console.error(`Search error: ${err.message}`);
+      res.status(500).json({ error: "Search failed" });
+    }
   });
 
-  app.listen(port, () => {
+  app.use((err, _req, res, _next) => {
+    console.error(`Server error: ${err.message}`);
+    res.status(500).json({ error: "Internal server error" });
+  });
+
+  const server = app.listen(port, () => {
     console.log(`Web UI running at http://localhost:${port}`);
   });
+
+  process.on("SIGTERM", () => {
+    server.close(() => process.exit(0));
+  });
+
+  return server;
 }
