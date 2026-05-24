@@ -70,7 +70,7 @@ export async function buildIndex(fileEntries) {
     fields: ["title", "aliases", "tags", "body"],
     storeFields: [
       "path", "filename", "title", "tags", "aliases", "date",
-      "modified", "mtimeMs",
+      "modified", "mtimeMs", "id",
     ],
     tokenize,
     searchOptions: {

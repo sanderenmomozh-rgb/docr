@@ -16,6 +16,8 @@ export function startServer(index, bodies, port = 3000, files = []) {
   input { width: 100%; padding: 0.75rem; font-size: 1.1rem; border: 2px solid #ccc; border-radius: 6px; }
   .result { margin: 1rem 0; padding: 0.75rem; border-left: 3px solid #4a90d9; background: #f9f9f9; }
   .result h3 { margin: 0 0 0.25rem; }
+  .result h3 a { color: #4a90d9; text-decoration: none; }
+  .result h3 a:hover { text-decoration: underline; }
   .result .meta { font-size: 0.85rem; color: #666; }
   .result .snippet { margin-top: 0.3rem; }
 </style></head>
@@ -33,7 +35,7 @@ export function startServer(index, bodies, port = 3000, files = []) {
       const res = await fetch("/search?q=" + encodeURIComponent(q));
       const data = await res.json();
       out.innerHTML = data.map(r =>
-        '<div class="result"><h3>' + esc(r.title) + '</h3>' +
+        '<div class="result"><h3><a href="/doc/' + encodeURIComponent(r.path) + '">' + esc(r.title) + '</a></h3>' +
         '<div class="meta">' + esc(r.filename) + (r.tags.length ? ' &middot; ' + r.tags.map(esc).join(', ') : '') + '</div>' +
         '<div class="snippet">' + esc(r.snippet) + '</div></div>'
       ).join("");
@@ -41,6 +43,21 @@ export function startServer(index, bodies, port = 3000, files = []) {
     function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
   </script>
 </body></html>`);
+  });
+
+  app.get("/doc/*", (req, res) => {
+    try {
+      const path = decodeURIComponent(req.params[0]);
+      const body = bodies.get(path);
+      if (!body) return res.status(404).send("<h1>Not found</h1>");
+      const H = (s) => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+      const title = H(body.frontmatter?.title || path.split("/").pop().replace(".md", ""));
+      const content = H(body.body);
+      const html = '<!DOCTYPE html><html><head><meta charset="utf-8"><title>' + title + '</title><style>body{font-family:system-ui;max-width:800px;margin:2rem auto;padding:0 1rem;line-height:1.6;}pre{background:#f5f5f5;padding:1rem;border-radius:6px;overflow-x:auto;}a{color:#4a90d9;}.back{margin-bottom:1.5rem;}</style></head><body><div class="back"><a href="/">← 搜索</a></div><div style="white-space:pre-wrap;font-family:inherit;">' + content + '</div></body></html>';
+      res.send(html);
+    } catch (err) {
+      res.status(500).json({ error: "Doc failed" });
+    }
   });
 
   app.get("/search", (req, res) => {
@@ -56,6 +73,7 @@ export function startServer(index, bodies, port = 3000, files = []) {
         return {
           title: r.title || r.id,
           filename: r.filename || "",
+          path: r.id || "",
           tags: r.tags || [],
           snippet: snippet + (body.length > start + 200 ? "..." : ""),
         };
