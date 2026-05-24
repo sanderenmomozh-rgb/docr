@@ -423,28 +423,24 @@ export function startServer(index, bodies, port = 3000, files = []) {
       const newContent = matter.stringify(parsed.content, parsed.data);
       await writeFile(docPath, newContent, "utf-8");
 
+      // Update in-memory bodies map
+      const entry = bodies.get(docPath);
+      if (entry) {
+        entry.frontmatter = parsed.data;
+        entry.body = parsed.content;
+      }
+
       // Append to _log.md
-      const vaultDir = process.env.VAULT_DIR || files[0]?.path?.split("/wiki/")[0] || "";
+      const vaultDir = files[0]?.path?.replace(/\/wiki\/.*/, "") || "";
       const logPath = vaultDir + "/wiki/_log.md";
       try {
         const logRaw = await readFile(logPath, "utf-8");
-        const pageName = docPath.split("/").pop().replace(".md", "");
-        const logEntry = `\n## [${today}] review | [[${pageName}]] 审核通过 → published\n\n审核人：${reviewer || "Sande"}\n`;
+        const pageName = docPath.replace(/\\/g, "/").split("/").pop().replace(".md", "");
+        const logEntry = `\n## [${today}] review | [[${pageName}]] → published\n\n审核人：${reviewer || "Sande"}\n`;
         await writeFile(logPath, logRaw + logEntry, "utf-8");
       } catch (e) {
         console.error(`Log update failed: ${e.message}`);
       }
-
-      // Rebuild index
-      const { buildIndex } = await import("./indexer.js");
-      const { index: newIdx, bodies: newBodies } = await buildIndex(files);
-      Object.assign(bodies, Object.fromEntries(newBodies));
-      index.tokenSet = newIdx.tokenSet;
-      index._documentIds = newIdx._documentIds;
-      index.documentCount = newIdx.documentCount;
-      Object.assign(index._fieldIds, newIdx._fieldIds);
-      Object.assign(index._storedFields, newIdx._storedFields);
-      Object.assign(index._index, newIdx._index);
 
       res.json({ ok: true, page: docPath, status: "published" });
     } catch (err) {

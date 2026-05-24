@@ -588,7 +588,12 @@ Triggered when a new source is added to `00_Inbox/` or `raw/`.
          - <chunkid1>  # <platform> - <question summary>
          - <chunkid2>  # <platform> - <question summary>
        ```
-    e) SPLIT DETECTION: if a question within the same 三级分类 has different answers across platforms → flag to user: "[[主题]] 中 [平台X] 的答案与其他平台不一致，是否需要拆分为独立页面？"
+    e) SPLIT DETECTION (MANDATORY — run platform_diff.py scan after every batch ingest):
+       - Group same questions across platforms, compare answer text
+       - 联系人差异：答案模板相同但联系人/电话不同 → 在合并页面中以表格形式列出各平台对应联系人，不可只保留一个版本
+       - 规则/流程差异：阈值不同（3次 vs 6次）、流程不同（"请联系HRBP" vs 详细步骤）、适用条件不同 → 需拆分独立页面
+       - 对每个关注级差异 → flag to user: "[[主题]] 中 [平台X] 的答案与其他平台不一致（说明差异），是否需要拆分为独立页面？"
+       - 差异扫描报告追加到 _log.md
     f) PAGE RELATIONSHIP fields for split scenarios:
        - Main page frontmatter: `platform_variants: ["[[分拆页]]"]`
        - Split page frontmatter: `extends: "[[主页]]"`
