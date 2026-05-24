@@ -4,10 +4,12 @@
  */
 export function extractWikilinks(body) {
   if (!body) return [];
+  // Remove inline code spans so [[placeholders]] inside backticks are ignored
+  const cleaned = body.replace(/`[^`]*`/g, "");
   const results = [];
   const re = /!?\[\[([^\]|#]+)(?:#([^\]|]*))?(?:\|([^\]]+))?\]\]/g;
   let match;
-  while ((match = re.exec(body)) !== null) {
+  while ((match = re.exec(cleaned)) !== null) {
     results.push({
       target: match[1].trim(),
       heading: match[2]?.trim() || null,
@@ -47,8 +49,9 @@ export function buildLinkGraph(documents) {
     }
   }
 
-  // Extract links from each document
+  // Extract links from each document, skip template placeholder links
   const allPaths = new Set(documents.map((d) => d.path));
+  const isTemplate = (p) => p.includes("/templates/") || p.includes("\\templates\\");
 
   for (const doc of documents) {
     const links = extractWikilinks(doc.body || "");
@@ -57,13 +60,28 @@ export function buildLinkGraph(documents) {
       const target = link.target;
       targets.add(target);
 
-      // Resolve target to actual paths
+      // Resolve target to actual paths — try title, alias, then file path
       const tkey = target.toLowerCase();
-      const targetPaths =
+      let targetPaths =
         titleToPaths.get(tkey) || aliasToPaths.get(tkey);
 
+      // Fallback: match by file path (for raw/specs etc.)
       if (!targetPaths || targetPaths.length === 0) {
-        brokenLinks.push({ source: doc.path, target });
+        const targetLower = target.toLowerCase();
+        for (const p of allPaths) {
+          const pLower = p.toLowerCase();
+          if (pLower === targetLower || pLower.endsWith('/' + targetLower) || pLower.endsWith('/' + targetLower + '.md')) {
+            targetPaths = [p];
+            break;
+          }
+        }
+      }
+
+      if (!targetPaths || targetPaths.length === 0) {
+        // Template placeholder links are expected, don't flag
+        if (!isTemplate(doc.path)) {
+          brokenLinks.push({ source: doc.path, target });
+        }
       }
 
       // Build backlinks: for each resolved target path, add this doc as a backlink
@@ -80,6 +98,7 @@ export function buildLinkGraph(documents) {
   // Find orphans: docs with no incoming backlinks
   const orphans = [];
   for (const doc of documents) {
+    if (isTemplate(doc.path)) continue;
     const incoming = backlinks.get(doc.path);
     if (!incoming || incoming.size === 0) {
       orphans.push(doc.path);
