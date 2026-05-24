@@ -3,6 +3,20 @@ import { basename } from "node:path";
 import matter from "gray-matter";
 import MiniSearch from "minisearch";
 
+// Tokenize Chinese characters individually, keep ASCII/numbers as words
+export function tokenize(text) {
+  if (!text) return [];
+  const tokens = [];
+  const re = /([一-鿿])|([a-zA-Z0-9]+)|([^一-鿿a-zA-Z0-9\s]+)/g;
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    if (m[1]) tokens.push(m[1]);
+    else if (m[2]) tokens.push(m[2]);
+    else if (m[3]) {}
+  }
+  return tokens.length ? tokens : text.split(/\s+/);
+}
+
 function normalizeTags(tags) {
   if (!tags) return [];
   if (Array.isArray(tags)) return tags;
@@ -58,6 +72,7 @@ export async function buildIndex(fileEntries) {
       "path", "filename", "title", "tags", "aliases", "date",
       "modified", "mtimeMs",
     ],
+    tokenize,
     searchOptions: {
       boost: { title: 3, aliases: 2, tags: 2, body: 1 },
       prefix: true,

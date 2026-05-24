@@ -3,7 +3,9 @@
  * The bodies map (path -> body text) is used to extract context snippets.
  */
 export function search(index, bodies, query) {
-  const raw = index.search(query);
+  const hasCJK = /[一-鿿]/.test(query);
+  const opts = hasCJK ? { combineWith: "AND" } : {};
+  const raw = index.search(query, opts);
 
   return raw.slice(0, 20).map((r) => ({
     ...r,

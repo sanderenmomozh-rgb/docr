@@ -38,11 +38,13 @@ export async function loadIndex(dir) {
       readFile(join(cacheDir, META_FILE), "utf-8"),
     ]);
 
+    const { tokenize } = await import("./indexer.js");
     const index = MiniSearch.loadJSON(indexJson, {
-      fields: ["title", "tags", "body"],
-      storeFields: ["path", "filename", "title", "tags", "date", "mtimeMs"],
+      fields: ["title", "aliases", "tags", "body"],
+      storeFields: ["path", "filename", "title", "tags", "aliases", "date", "mtimeMs"],
+      tokenize,
       searchOptions: {
-        boost: { title: 3, tags: 2, body: 1 },
+        boost: { title: 3, aliases: 2, tags: 2, body: 1 },
         prefix: true,
       },
     });
