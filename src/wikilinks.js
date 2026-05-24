@@ -51,7 +51,10 @@ export function buildLinkGraph(documents) {
 
   // Extract links from each document, skip template placeholder links
   const allPaths = new Set(documents.map((d) => d.path));
-  const isTemplate = (p) => p.includes("/templates/") || p.includes("\\templates\\");
+  const isContentPage = (p) =>
+    !p.includes("/templates/") && !p.includes("\\templates\\") &&
+    !p.includes("/00_Inbox/") && !p.includes("\\00_Inbox\\") &&
+    !p.includes("/01_Daily/") && !p.includes("\\01_Daily\\");
 
   for (const doc of documents) {
     const links = extractWikilinks(doc.body || "");
@@ -79,7 +82,7 @@ export function buildLinkGraph(documents) {
 
       if (!targetPaths || targetPaths.length === 0) {
         // Template placeholder links are expected, don't flag
-        if (!isTemplate(doc.path)) {
+        if (isContentPage(doc.path)) {
           brokenLinks.push({ source: doc.path, target });
         }
       }
@@ -98,7 +101,7 @@ export function buildLinkGraph(documents) {
   // Find orphans: docs with no incoming backlinks
   const orphans = [];
   for (const doc of documents) {
-    if (isTemplate(doc.path)) continue;
+    if (!isContentPage(doc.path)) continue;
     const incoming = backlinks.get(doc.path);
     if (!incoming || incoming.size === 0) {
       orphans.push(doc.path);
