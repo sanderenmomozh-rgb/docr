@@ -60,6 +60,7 @@ export async function buildIndex(fileEntries) {
         body: content,
         mtimeMs: entry.mtimeMs,
         size: entry.size,
+        frontmatter: data,
       });
     } catch (err) {
       console.error(`Error indexing ${entry.path}: ${err.message}`);
@@ -82,7 +83,7 @@ export async function buildIndex(fileEntries) {
   miniSearch.addAll(documents);
 
   const bodies = new Map(
-    documents.map((d) => [d.path, { body: d.body, frontmatter: { title: d.title, tags: d.tags, aliases: d.aliases, date: d.date, modified: d.modified } }])
+    documents.map((d) => [d.path, { body: d.body, frontmatter: d.frontmatter }])
   );
 
   return { index: miniSearch, bodies };

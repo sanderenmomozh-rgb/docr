@@ -1,4 +1,6 @@
 import express from "express";
+import { readFile, writeFile } from "node:fs/promises";
+import matter from "gray-matter";
 
 /**
  * Start a simple web UI for browsing and searching indexed docs.
@@ -6,6 +8,7 @@ import express from "express";
  */
 export function startServer(index, bodies, port = 3000, files = []) {
   const app = express();
+  app.use(express.json());
 
   app.get("/", (_req, res) => {
     res.send(`<!DOCTYPE html>
@@ -22,7 +25,7 @@ export function startServer(index, bodies, port = 3000, files = []) {
   .result .snippet { margin-top: 0.3rem; }
 </style></head>
 <body>
-  <div style="margin-bottom:1rem;"><a href="/dashboard" style="color:#4a90d9;text-decoration:none;">仪表盘</a></div>
+  <div style="margin-bottom:1rem;"><a href="/dashboard" style="color:#4a90d9;text-decoration:none;">仪表盘</a> | <a href="/admin" style="color:#4a90d9;text-decoration:none;">审核</a></div>
   <h1>Doc Organizer</h1>
   <input type="text" id="q" placeholder="Search your notes..." autofocus />
   <div id="results"></div>
@@ -201,6 +204,277 @@ export function startServer(index, bodies, port = 3000, files = []) {
     } catch (err) {
       console.error(`Dashboard error: ${err.message}`);
       res.status(500).json({ error: "Dashboard failed" });
+    }
+  });
+
+  app.get("/admin", (_req, res) => {
+    res.send(`<!DOCTYPE html>
+<html lang="zh-CN">
+<head><title>审核发布</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: system-ui, sans-serif; background: #f5f5f5; color: #333; padding: 2rem; }
+  h1 { margin-bottom: 0.5rem; }
+  .sub { color: #999; font-size: 0.9rem; margin-bottom: 1.5rem; }
+  .page { background: #fff; border-radius: 8px; padding: 1rem 1.25rem; margin-bottom: 0.75rem; box-shadow: 0 1px 3px rgba(0,0,0,0.08); display: flex; align-items: center; gap: 1rem; }
+  .page .info { flex: 1; min-width: 0; }
+  .page .title { font-weight: 600; }
+  .page .meta { font-size: 0.8rem; color: #888; margin-top: 0.2rem; }
+  .page .actions { display: flex; gap: 0.5rem; flex-shrink: 0; }
+  button { padding: 0.4rem 0.9rem; border: none; border-radius: 4px; cursor: pointer; font-size: 0.85rem; }
+  .btn-view { background: #e8f0fe; color: #4a90d9; }
+  .btn-edit { background: #fff3cd; color: #856404; }
+  .btn-approve { background: #d4edda; color: #155724; font-weight: 600; }
+  button:hover { opacity: 0.8; }
+  button:disabled { opacity: 0.4; cursor: not-allowed; }
+  .modal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 100; justify-content: center; align-items: center; }
+  .modal.active { display: flex; }
+  .modal-content { background: #fff; border-radius: 8px; padding: 1.5rem; width: 90%; max-width: 700px; max-height: 80vh; overflow-y: auto; }
+  .modal-content h3 { margin-bottom: 1rem; }
+  .modal-content textarea { width: 100%; height: 300px; font-family: monospace; font-size: 0.85rem; padding: 0.75rem; border: 1px solid #ddd; border-radius: 4px; resize: vertical; }
+  .modal-content .btns { margin-top: 1rem; display: flex; gap: 0.5rem; justify-content: flex-end; }
+  .toast { position: fixed; bottom: 2rem; right: 2rem; background: #333; color: #fff; padding: 0.75rem 1.5rem; border-radius: 6px; z-index: 200; display: none; }
+  .toast.show { display: block; }
+  .empty { text-align: center; color: #999; padding: 3rem; }
+  .nav { margin-bottom: 1rem; }
+  .nav a { color: #4a90d9; text-decoration: none; }
+</style></head>
+<body>
+  <div class="nav"><a href="/">← 搜索</a> | <a href="/dashboard">仪表盘</a></div>
+  <h1>审核发布</h1>
+  <p class="sub" id="count">加载中...</p>
+  <div id="list"></div>
+  <div class="toast" id="toast"></div>
+
+  <div class="modal" id="editModal">
+    <div class="modal-content">
+      <h3 id="editTitle">编辑</h3>
+      <textarea id="editContent"></textarea>
+      <div class="btns">
+        <button class="btn-view" onclick="closeEdit()">取消</button>
+        <button class="btn-approve" onclick="saveEdit()">保存并发布</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let currentEditPath = '';
+    let pendingPages = [];
+
+    async function load() {
+      const res = await fetch('/admin/pending');
+      const data = await res.json();
+      pendingPages = data.pages;
+      document.getElementById('count').textContent = '待审核：' + data.total + ' 页';
+      const list = document.getElementById('list');
+      if (data.total === 0) {
+        list.innerHTML = '<div class="empty">所有页面已发布</div>';
+        return;
+      }
+      list.innerHTML = data.pages.map((p, i) =>
+        '<div class="page">' +
+        '<div class="info">' +
+        '<div class="title">' + esc(p.title) + '</div>' +
+        '<div class="meta">' + esc(p.filename) + (p.scope ? ' · ' + esc(p.scope) : '') + (p.reviewer ? ' · 审核人: ' + esc(p.reviewer) : '') + '</div>' +
+        '</div>' +
+        '<div class="actions">' +
+        '<button class="btn-view" onclick="preview(' + i + ')">预览</button>' +
+        '<button class="btn-edit" onclick="startEdit(' + i + ')">编辑</button>' +
+        '<button class="btn-approve" onclick="approve(' + i + ')">审批通过</button>' +
+        '</div></div>'
+      ).join('');
+    }
+
+    function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+    function preview(i) {
+      window.open('/doc/' + encodeURIComponent(pendingPages[i].path), '_blank');
+    }
+
+    async function approve(i) {
+      const p = pendingPages[i];
+      if (!confirm('确认发布：' + p.title + '？')) return;
+      const btn = event.target;
+      btn.disabled = true;
+      btn.textContent = '处理中...';
+      const res = await fetch('/admin/approve', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: p.path })
+      });
+      if (res.ok) {
+        showToast('已发布：' + p.title);
+        load();
+      } else {
+        showToast('发布失败');
+        btn.disabled = false;
+        btn.textContent = '审批通过';
+      }
+    }
+
+    async function startEdit(i) {
+      const p = pendingPages[i];
+      currentEditPath = p.path;
+      document.getElementById('editTitle').textContent = '编辑：' + p.title;
+      const res = await fetch('/admin/full?path=' + encodeURIComponent(p.path));
+      const data = await res.json();
+      document.getElementById('editContent').value = data.content;
+      document.getElementById('editModal').classList.add('active');
+    }
+
+    function closeEdit() {
+      document.getElementById('editModal').classList.remove('active');
+      currentEditPath = '';
+    }
+
+    async function saveEdit() {
+      const newContent = document.getElementById('editContent').value;
+      // Save content
+      const res = await fetch('/admin/edit', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: currentEditPath, content: newContent })
+      });
+
+      if (res.ok) {
+        // Then approve
+        const res2 = await fetch('/admin/approve', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ path: currentEditPath })
+        });
+        if (res2.ok) {
+          closeEdit();
+          showToast('已编辑并发布');
+          load();
+        }
+      } else {
+        showToast('保存失败');
+      }
+    }
+
+    function showToast(msg) {
+      const t = document.getElementById('toast');
+      t.textContent = msg;
+      t.classList.add('show');
+      setTimeout(() => t.classList.remove('show'), 2500);
+    }
+
+    load();
+  </script>
+</body></html>`);
+  });
+
+  // Full raw file content for edit
+  app.get("/admin/full", async (req, res) => {
+    try {
+      const docPath = req.query.path;
+      if (!docPath) return res.status(400).json({ error: "path required" });
+      const raw = await readFile(docPath, "utf-8");
+      res.json({ content: raw });
+    } catch (err) {
+      res.status(500).json({ error: "Read failed" });
+    }
+  });
+
+  // ── Admin API ──
+
+  app.get("/admin/pending", async (_req, res) => {
+    try {
+      const pending = [];
+      for (const f of files) {
+        const entry = bodies.get(f.path);
+        if (!entry) continue;
+        const isTemplate = f.path.includes("/templates/") || f.path.includes("\\templates\\");
+        if (isTemplate) continue;
+        const fm = entry.frontmatter || {};
+        if (fm.status === "draft-pending-review") {
+          pending.push({
+            path: f.path,
+            filename: f.path.split("/").pop(),
+            title: fm.title || f.path.split("/").pop().replace(".md", ""),
+            tags: fm.tags || [],
+            scope: fm.scope || "",
+            date: fm.date || "",
+            reviewer: fm.reviewer || "",
+          });
+        }
+      }
+      res.json({ total: pending.length, pages: pending });
+    } catch (err) {
+      console.error(`Admin pending error: ${err.message}`);
+      res.status(500).json({ error: "Failed" });
+    }
+  });
+
+  app.post("/admin/approve", async (req, res) => {
+    try {
+      const { path: docPath, reviewer } = req.body || {};
+      if (!docPath) return res.status(400).json({ error: "path required" });
+
+      const raw = await readFile(docPath, "utf-8");
+      const parsed = matter(raw);
+
+      const today = new Date().toISOString().slice(0, 10);
+      parsed.data.status = "published";
+      parsed.data.reviewer = reviewer || "Sande";
+      parsed.data.review_date = today;
+
+      const newContent = matter.stringify(parsed.content, parsed.data);
+      await writeFile(docPath, newContent, "utf-8");
+
+      // Append to _log.md
+      const vaultDir = process.env.VAULT_DIR || files[0]?.path?.split("/wiki/")[0] || "";
+      const logPath = vaultDir + "/wiki/_log.md";
+      try {
+        const logRaw = await readFile(logPath, "utf-8");
+        const pageName = docPath.split("/").pop().replace(".md", "");
+        const logEntry = `\n## [${today}] review | [[${pageName}]] 审核通过 → published\n\n审核人：${reviewer || "Sande"}\n`;
+        await writeFile(logPath, logRaw + logEntry, "utf-8");
+      } catch (e) {
+        console.error(`Log update failed: ${e.message}`);
+      }
+
+      // Rebuild index
+      const { buildIndex } = await import("./indexer.js");
+      const { index: newIdx, bodies: newBodies } = await buildIndex(files);
+      Object.assign(bodies, Object.fromEntries(newBodies));
+      index.tokenSet = newIdx.tokenSet;
+      index._documentIds = newIdx._documentIds;
+      index.documentCount = newIdx.documentCount;
+      Object.assign(index._fieldIds, newIdx._fieldIds);
+      Object.assign(index._storedFields, newIdx._storedFields);
+      Object.assign(index._index, newIdx._index);
+
+      res.json({ ok: true, page: docPath, status: "published" });
+    } catch (err) {
+      console.error(`Admin approve error: ${err.message}`);
+      res.status(500).json({ error: "Approve failed" });
+    }
+  });
+
+  app.post("/admin/edit", async (req, res) => {
+    try {
+      const { path: docPath, content } = req.body || {};
+      if (!docPath || content === undefined) return res.status(400).json({ error: "path and content required" });
+
+      await writeFile(docPath, content, "utf-8");
+
+      // Rebuild index
+      const { buildIndex } = await import("./indexer.js");
+      const { index: newIdx, bodies: newBodies } = await buildIndex(files);
+      Object.assign(bodies, Object.fromEntries(newBodies));
+      index.tokenSet = newIdx.tokenSet;
+      index._documentIds = newIdx._documentIds;
+      index.documentCount = newIdx.documentCount;
+      Object.assign(index._fieldIds, newIdx._fieldIds);
+      Object.assign(index._storedFields, newIdx._storedFields);
+      Object.assign(index._index, newIdx._index);
+
+      res.json({ ok: true, page: docPath });
+    } catch (err) {
+      console.error(`Admin edit error: ${err.message}`);
+      res.status(500).json({ error: "Edit failed" });
     }
   });
 
