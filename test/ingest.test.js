@@ -1,0 +1,149 @@
+import { describe, it, before, after } from "node:test";
+import assert from "node:assert";
+import { mkdtemp, rm, writeFile, mkdir, readFile } from "node:fs/promises";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { buildIndex } from "../src/indexer.js";
+import { confirmInbox, loadInboxState } from "../src/inbox.js";
+import { executeIngest } from "../src/ingest.js";
+
+let tmpDir;
+
+async function setupVault(files = {}) {
+  const vault = await mkdtemp(join(tmpdir(), "docr-test-"));
+  const inbox = join(vault, "00_Inbox");
+  const wiki = join(vault, "wiki");
+  await mkdir(inbox, { recursive: true });
+  await mkdir(wiki, { recursive: true });
+  // Create minimal _index.md and _log.md
+  await writeFile(join(wiki, "_index.md"), "# Index\n");
+  await writeFile(join(wiki, "_log.md"), "# Log\n");
+  for (const [name, content] of Object.entries(files)) {
+    await writeFile(join(inbox, name), content);
+  }
+  return vault;
+}
+
+before(async () => {
+  tmpDir = await mkdtemp(join(tmpdir(), "docr-tests-"));
+});
+
+after(async () => {
+  await rm(tmpDir, { recursive: true, force: true });
+});
+
+// ── executeIngest ──
+
+describe("executeIngest", () => {
+  it("field-spec CSV creates raw/specs file with field table", async () => {
+    const csvContent = "字段名,取值逻辑,码值,必填,备注\n姓名,取员工主数据, ,是, \n部门,取组织架构, ,是,如有调动以最新为准";
+    const vault = await setupVault({ "field-spec.csv": csvContent });
+    const filePath = join(vault, "00_Inbox", "field-spec.csv");
+    await confirmInbox(vault, "field-spec.csv");
+
+    // Build index from inbox (will be empty but valid)
+    const { index, bodies } = await buildIndex([]);
+
+    const result = await executeIngest(filePath, vault, index, bodies);
+    assert.strictEqual(result.source, "field-spec.csv");
+    assert.strictEqual(result.type, "field-spec");
+    assert.strictEqual(result.dryRun, false);
+
+    await rm(vault, { recursive: true, force: true });
+  });
+
+  it("field-spec CSV creates raw/specs file with correct content", async () => {
+    const csvContent = "字段名,取值逻辑,码值,必填,备注\n姓名,取员工主数据, ,是, \n部门,取组织架构, ,是,如有调动以最新为准";
+    const vault = await setupVault({ "spec.csv": csvContent });
+    const filePath = join(vault, "00_Inbox", "spec.csv");
+    await confirmInbox(vault, "spec.csv");
+
+    const { index, bodies } = await buildIndex([]);
+    const result = await executeIngest(filePath, vault, index, bodies);
+
+    if (!result.skipped) {
+      assert.ok(result.created.length > 0);
+      const page = result.created[0];
+      // Verify the file was actually written
+      const content = await readFile(page.path, "utf-8");
+      assert.ok(content.includes("字段定义"));
+      assert.ok(content.includes("字段名"));
+    }
+
+    await rm(vault, { recursive: true, force: true });
+  });
+
+  it("marks source as ingested after successful execution", async () => {
+    const csvContent = "字段名,取值逻辑\n姓名,取员工主数据";
+    const vault = await setupVault({ "test.csv": csvContent });
+    const filePath = join(vault, "00_Inbox", "test.csv");
+    await confirmInbox(vault, "test.csv");
+
+    const { index, bodies } = await buildIndex([]);
+    const result = await executeIngest(filePath, vault, index, bodies);
+
+    if (!result.skipped) {
+      const state = await loadInboxState(vault);
+      assert.ok(state.items["test.csv"]);
+      assert.strictEqual(state.items["test.csv"].status, "ingested");
+    }
+
+    await rm(vault, { recursive: true, force: true });
+  });
+
+  it("dry-run does not write files", async () => {
+    const csvContent = "字段名,取值逻辑\n姓名,取员工主数据";
+    const vault = await setupVault({ "dry.csv": csvContent });
+    const filePath = join(vault, "00_Inbox", "dry.csv");
+    await confirmInbox(vault, "dry.csv");
+
+    const { index, bodies } = await buildIndex([]);
+    const result = await executeIngest(filePath, vault, index, bodies, { dryRun: true });
+
+    assert.strictEqual(result.dryRun, true);
+    // Check that no files were created
+    if (!result.skipped) {
+      for (const c of result.created) {
+        await assert.rejects(async () => { await readFile(c.path, "utf-8"); });
+      }
+    }
+
+    await rm(vault, { recursive: true, force: true });
+  });
+
+  it("skips conversion-ref files", async () => {
+    const vault = await setupVault({ "test-pandoc.md": "# Pandoc output\n\nSome content" });
+    const filePath = join(vault, "00_Inbox", "test-pandoc.md");
+    await confirmInbox(vault, "test-pandoc.md");
+
+    const { index, bodies } = await buildIndex([]);
+    const result = await executeIngest(filePath, vault, index, bodies);
+    assert.ok(result.skipped);
+    assert.ok(result.reason.includes("conversion-ref"));
+
+    await rm(vault, { recursive: true, force: true });
+  });
+
+  it("throws for existing file without --force", async () => {
+    const csvContent = "字段名,取值逻辑\n姓名,取员工主数据";
+    const vault = await setupVault({ "dup.csv": csvContent });
+    const filePath = join(vault, "00_Inbox", "dup.csv");
+    await confirmInbox(vault, "dup.csv");
+
+    // First ingest succeeds
+    const { index, bodies } = await buildIndex([]);
+    let result = await executeIngest(filePath, vault, index, bodies);
+
+    if (!result.skipped) {
+      // Re-confirm to allow second ingest attempt
+      await confirmInbox(vault, "dup.csv");
+      // Second ingest without --force should fail
+      await assert.rejects(
+        async () => { await executeIngest(filePath, vault, index, bodies); },
+        /already exists/
+      );
+    }
+
+    await rm(vault, { recursive: true, force: true });
+  });
+});

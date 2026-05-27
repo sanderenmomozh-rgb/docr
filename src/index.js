@@ -12,6 +12,7 @@ import { listInbox, confirmInbox, rejectInbox, detectType, summarizeInboxFile } 
 import { analyzeSource } from "./analyze.js";
 import { suggestLinks } from "./suggest.js";
 import { previewImpact } from "./impact.js";
+import { executeIngest } from "./ingest.js";
 
 const program = new Command();
 
@@ -700,6 +701,93 @@ program
         }
 
         console.log(`\nEstimated: ${impact.estimatedPageCount} new page(s), ${impact.wouldUpdate.length} existing page(s) updated`);
+        console.log();
+      } catch (err) {
+        console.error(`Error: ${err.message}`);
+        process.exit(1);
+      }
+    });
+
+// ── ingest ──
+
+  program
+    .command("ingest")
+    .description("Execute ingest: create wiki pages from a confirmed inbox source")
+    .argument("<source>", "filename in 00_Inbox/")
+    .option("--dry-run", "preview only, do not write files")
+    .option("--force", "overwrite existing pages")
+    .option("--format <format>", "output format (text|json)", "text")
+    .action(async (source, opts) => {
+      try {
+        const vaultPath = await getVaultPath();
+        const { join } = await import("node:path");
+        const filePath = join(vaultPath, "00_Inbox", source);
+
+        const items = await listInbox(vaultPath, "confirmed");
+        const item = items.find((i) => i.filename === source);
+        if (!item) {
+          console.error(`Error: "${source}" is not confirmed. Use "docr inbox confirm" first.`);
+          process.exit(1);
+        }
+
+        const { index, bodies } = await getOrBuildIndex(vaultPath);
+        const result = await executeIngest(filePath, vaultPath, index, bodies, {
+          dryRun: opts.dryRun || false,
+          force: opts.force || false,
+        });
+
+        if (result.skipped) {
+          console.log(`Skipped: ${result.reason}`);
+          return;
+        }
+
+        if (opts.format === "json") {
+          console.log(JSON.stringify(result, null, 2));
+          return;
+        }
+
+        if (result.dryRun) {
+          console.log(`\n╔══════════════════════════════════════╗`);
+          console.log(`║       INGEST  DRY  RUN               ║`);
+          console.log(`╚══════════════════════════════════════╝\n`);
+        } else {
+          console.log(`\n╔══════════════════════════════════════╗`);
+          console.log(`║       INGEST  COMPLETE               ║`);
+          console.log(`╚══════════════════════════════════════╝\n`);
+        }
+
+        console.log(`Source:  ${result.source}`);
+        console.log(`Type:    ${result.type}`);
+
+        if (result.created.length > 0) {
+          console.log(`\n── Created (${result.created.length} page(s)) ──`);
+          for (const c of result.created) {
+            const name = c.path.split("/").pop();
+            console.log(`\n  ${result.dryRun ? '📄' : '✅'} ${c.title}`);
+            console.log(`     ${c.path}`);
+            console.log(`     Template: ${c.template}`);
+            if (result.dryRun) {
+              console.log(`     Preview: ${c.body ? c.body.slice(0, 120) : '(scaffold)'}`);
+            }
+          }
+        }
+
+        if (result.updated && result.updated.length > 0) {
+          console.log(`\n── Would Update (${result.updated.length} page(s)) ──`);
+          for (const u of result.updated.slice(0, 5)) {
+            const name = u.path.split("/").pop();
+            console.log(`  ✏  ${name}: ${u.changes.join(", ")}`);
+          }
+          if (result.updated.length > 5) {
+            console.log(`  ... and ${result.updated.length - 5} more`);
+          }
+        }
+
+        if (result.dryRun) {
+          console.log(`\nDry run complete. No files were changed.`);
+          console.log(`Use without --dry-run to execute.`);
+        }
+
         console.log();
       } catch (err) {
         console.error(`Error: ${err.message}`);

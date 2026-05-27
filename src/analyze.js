@@ -10,7 +10,7 @@ import { join } from "node:path";
  */
 export async function analyzeSource(filePath, vaultPath, opts = {}) {
   const filename = filePath.replace(/\\/g, "/").split("/").pop();
-  const { text, format, images } = await readSource(filePath);
+  const { text, format, images, csvHeaders } = await readSource(filePath);
   const type = classifyType(filename, text, format);
   const summary = generateSummary(text, format, type);
   const keyInfo = extractKeyInfo(text, type);
@@ -29,6 +29,8 @@ export async function analyzeSource(filePath, vaultPath, opts = {}) {
     wordCount: text ? countWords(text) : 0,
     size: s.size,
     images,
+    csvHeaders: csvHeaders || null,
+    rawText: format === "csv" ? text : null,
   };
 }
 
@@ -44,8 +46,20 @@ async function readSource(filePath) {
 
   if (name.endsWith(".csv")) {
     const text = await readFile(filePath, "utf-8");
-    const firstLine = text.split(/\r?\n/)[0] || "";
-    return { text, format: "csv", images: [], csvHeaders: parseCsvHeaders(firstLine) };
+    const lines = text.split(/\r?\n/).filter(Boolean);
+    let firstLine = lines[0] || "";
+    let headers = parseCsvHeaders(firstLine);
+    // If first row looks like a title (single column), try next rows
+    if (headers.filter(Boolean).length <= 1 && lines.length > 1) {
+      for (let i = 1; i < Math.min(lines.length, 4); i++) {
+        const h = parseCsvHeaders(lines[i]);
+        if (h.filter(Boolean).length >= 2) {
+          headers = h;
+          break;
+        }
+      }
+    }
+    return { text, format: "csv", images: [], csvHeaders: headers };
   }
 
   if (name.endsWith(".docx")) {
@@ -84,8 +98,20 @@ function classifyType(filename, text, format) {
   const name = filename.toLowerCase();
 
   if (format === "csv") {
-    const firstLine = text.split(/\r?\n/)[0] || "";
-    const headers = parseCsvHeaders(firstLine);
+    // Check first few lines — some CSVs have a title row before headers
+    const lines = text.split(/\r?\n/).filter(Boolean);
+    const firstLine = lines[0] || "";
+    let headers = parseCsvHeaders(firstLine);
+    // If first row looks like a title (single column with many empty cells), check next rows
+    if (headers.filter(Boolean).length <= 1 && lines.length > 1) {
+      for (let i = 1; i < Math.min(lines.length, 4); i++) {
+        const h = parseCsvHeaders(lines[i]);
+        if (h.filter(Boolean).length >= 2) {
+          headers = h;
+          break;
+        }
+      }
+    }
     if (isRagFlowCsv(headers)) return "faq-csv";
     if (headers.some((h) => h.includes("工单") || h.includes("字段"))) return "field-spec";
     return "faq-csv";

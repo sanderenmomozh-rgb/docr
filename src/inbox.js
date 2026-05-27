@@ -146,6 +146,19 @@ export async function rejectInbox(vaultPath, filename, reason, rejectedBy) {
   await saveInboxState(vaultPath, state);
 }
 
+export async function markIngested(vaultPath, filename) {
+  const state = await loadInboxState(vaultPath);
+  const now = new Date().toISOString();
+
+  state.items[filename] = {
+    ...state.items[filename],
+    status: "ingested",
+    ingestedAt: now,
+  };
+
+  await saveInboxState(vaultPath, state);
+}
+
 // ── Type detection ──
 
 export function detectType(file, contentSample = null) {
