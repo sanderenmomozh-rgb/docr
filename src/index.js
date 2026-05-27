@@ -8,6 +8,10 @@ import { saveIndex, loadIndex, isCacheValid } from "./store.js";
 import { getConfig, setConfig, getVaultPath } from "./config.js";
 import { computeTagStats } from "./analytics.js";
 import { computeDashboard } from "./dashboard.js";
+import { listInbox, confirmInbox, rejectInbox, detectType, summarizeInboxFile } from "./inbox.js";
+import { analyzeSource } from "./analyze.js";
+import { suggestLinks } from "./suggest.js";
+import { previewImpact } from "./impact.js";
 
 const program = new Command();
 
@@ -377,4 +381,330 @@ program
     }
   });
 
-program.parse();
+// ── inbox ──
+
+  function formatSize(bytes) {
+    if (bytes < 1024) return bytes + " B";
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KB";
+    return (bytes / (1024 * 1024)).toFixed(1) + " MB";
+  }
+
+  program
+    .command("inbox")
+    .description("Manage 00_Inbox/ review queue")
+    .addCommand(
+      new Command("list")
+        .description("List inbox items with review status")
+        .option("--status <status>", "filter by status (pending|confirmed|rejected|all)", "all")
+        .action(async (opts) => {
+          try {
+            const vaultPath = await getVaultPath();
+            const items = await listInbox(vaultPath, opts.status);
+            if (items.length === 0) {
+              console.log("Inbox is empty.");
+              return;
+            }
+            const statusLabel = { pending: "⏳", confirmed: "✅", rejected: "❌" };
+            for (const item of items) {
+              const icon = statusLabel[item.status] || "  ";
+              const typeLabel = item.type || detectType(item);
+              console.log(`${icon} [${item.status.padEnd(9)}] ${item.ext.padEnd(6)} ${formatSize(item.size).padStart(8)}  ${item.filename}${typeLabel ? "  (" + typeLabel + ")" : ""}`);
+            }
+            console.log(`\n${items.length} item(s)`);
+          } catch (err) {
+            console.error(`Error: ${err.message}`);
+            process.exit(1);
+          }
+        })
+    )
+    .addCommand(
+      new Command("scan")
+        .description("Scan inbox for new files awaiting pre-review")
+        .action(async () => {
+          try {
+            const vaultPath = await getVaultPath();
+            const items = await listInbox(vaultPath, "pending");
+            if (items.length === 0) {
+              console.log("No new files awaiting pre-review.");
+              return;
+            }
+            console.log(`Found ${items.length} file(s) awaiting pre-review:\n`);
+            for (const item of items) {
+              const typeLabel = item.type || detectType(item);
+              console.log(`  ${item.filename}  (${typeLabel}, ${formatSize(item.size)})`);
+            }
+            console.log(`\n${items.length} file(s) pending. Use "docr inbox preview <file>" to review.`);
+          } catch (err) {
+            console.error(`Error: ${err.message}`);
+            process.exit(1);
+          }
+        })
+    )
+    .addCommand(
+      new Command("preview")
+        .description("Preview a structured summary of an inbox file")
+        .argument("<file>", "filename in 00_Inbox/")
+        .option("--format <format>", "output format (text|json)", "text")
+        .action(async (file, opts) => {
+          try {
+            const vaultPath = await getVaultPath();
+            const { join } = await import("node:path");
+            const filePath = join(vaultPath, "00_Inbox", file);
+            const summary = await summarizeInboxFile(filePath, vaultPath);
+            if (opts.format === "json") {
+              console.log(JSON.stringify(summary, null, 2));
+              return;
+            }
+            console.log(`\n── ${summary.filename} ──`);
+            console.log(`Type:       ${summary.type}`);
+            console.log(`Format:     ${summary.format}`);
+            console.log(`Words:      ${summary.wordCount}`);
+            console.log(`Size:       ${(summary.size / 1024).toFixed(1)} KB`);
+            if (summary.summary) console.log(`\nSummary:\n  ${summary.summary}`);
+            const ki = summary.keyInfo;
+            if (ki.scope) console.log(`\nScope:\n  ${ki.scope}`);
+            if (ki.amounts.length) console.log(`\nAmounts:\n  ${ki.amounts.join(", ")}`);
+            if (ki.dates.length) console.log(`\nDates:\n  ${ki.dates.join(", ")}`);
+            if (ki.rates.length) console.log(`\nRates:\n  ${ki.rates.join(", ")}`);
+            if (ki.hasTemporalFlag) console.log(`\n⚠  Contains time-sensitive data`);
+            if (summary.images.length) console.log(`\nImages:    ${summary.images.length} reference(s)`);
+            const sp = summary.suggestedPlacement;
+            console.log(`\nSuggested placement:`);
+            console.log(`  Directory:  ${sp.wikiDir}`);
+            console.log(`  Filename:   ${sp.suggestedFilename}.md`);
+            console.log(`  Template:   ${sp.template}`);
+            console.log();
+          } catch (err) {
+            console.error(`Error: ${err.message}`);
+            process.exit(1);
+          }
+        })
+    )
+    .addCommand(
+      new Command("admit")
+        .description("Admit an inbox item to the knowledge base (alias for confirm)")
+        .argument("<file>", "filename in 00_Inbox/")
+        .option("--type <type>", "override content type classification")
+        .option("--notes <notes>", "review notes")
+        .action(async (file, opts) => {
+          try {
+            const vaultPath = await getVaultPath();
+            const meta = {};
+            if (opts.type) meta.type = opts.type;
+            if (opts.notes) meta.notes = opts.notes;
+            await confirmInbox(vaultPath, file, meta);
+            console.log(`Admitted: ${file}`);
+          } catch (err) {
+            console.error(`Error: ${err.message}`);
+            process.exit(1);
+          }
+        })
+    )
+    .addCommand(
+      new Command("confirm")
+        .description("Confirm an inbox item for ingestion")
+        .argument("<file>", "filename in 00_Inbox/")
+        .option("--type <type>", "override content type classification")
+        .option("--notes <notes>", "review notes")
+        .action(async (file, opts) => {
+          try {
+            const vaultPath = await getVaultPath();
+            const meta = {};
+            if (opts.type) meta.type = opts.type;
+            if (opts.notes) meta.notes = opts.notes;
+            await confirmInbox(vaultPath, file, meta);
+            console.log(`Confirmed: ${file}`);
+          } catch (err) {
+            console.error(`Error: ${err.message}`);
+            process.exit(1);
+          }
+        })
+    )
+    .addCommand(
+      new Command("reject")
+        .description("Reject an inbox item (skip ingestion)")
+        .argument("<file>", "filename in 00_Inbox/")
+        .option("--reason <reason>", "reason for rejection")
+        .action(async (file, opts) => {
+          try {
+            const vaultPath = await getVaultPath();
+            await rejectInbox(vaultPath, file, opts.reason || "");
+            console.log(`Rejected: ${file}`);
+          } catch (err) {
+            console.error(`Error: ${err.message}`);
+            process.exit(1);
+          }
+        })
+    );
+
+// ── analyze ──
+
+  program
+    .command("analyze")
+    .description("Analyze a confirmed inbox source")
+    .argument("<source>", "filename in 00_Inbox/")
+    .option("--format <format>", "output format (text|json)", "text")
+    .action(async (source, opts) => {
+      try {
+        const vaultPath = await getVaultPath();
+        const items = await listInbox(vaultPath, "confirmed");
+        const item = items.find((i) => i.filename === source);
+        if (!item) {
+          console.error(`Error: "${source}" is not confirmed. Use "docr inbox confirm" first.`);
+          process.exit(1);
+        }
+        const result = await analyzeSource(item.path, vaultPath);
+        if (opts.format === "json") {
+          console.log(JSON.stringify(result, null, 2));
+          return;
+        }
+        console.log(`\n── ${result.filename} ──`);
+        console.log(`Type:       ${result.type}`);
+        console.log(`Format:     ${result.format}`);
+        console.log(`Words:      ${result.wordCount}`);
+        console.log(`Size:       ${(result.size / 1024).toFixed(1)} KB`);
+        if (result.summary) console.log(`\nSummary:\n  ${result.summary}`);
+        const ki = result.keyInfo;
+        if (ki.scope) console.log(`\nScope:\n  ${ki.scope}`);
+        if (ki.amounts.length) console.log(`\nAmounts:\n  ${ki.amounts.join(", ")}`);
+        if (ki.dates.length) console.log(`\nDates:\n  ${ki.dates.join(", ")}`);
+        if (ki.rates.length) console.log(`\nRates:\n  ${ki.rates.join(", ")}`);
+        if (ki.hasTemporalFlag) console.log(`\n⚠  Contains time-sensitive data`);
+        if (result.images.length) console.log(`\nImages:    ${result.images.length} reference(s)`);
+        const sp = result.suggestedPlacement;
+        console.log(`\nSuggested placement:`);
+        console.log(`  Directory:  ${sp.wikiDir}`);
+        console.log(`  Filename:   ${sp.suggestedFilename}.md`);
+        console.log(`  Template:   ${sp.template}`);
+        console.log();
+      } catch (err) {
+        console.error(`Error: ${err.message}`);
+        process.exit(1);
+      }
+    });
+
+// ── suggest-links ──
+
+  program
+    .command("suggest-links")
+    .description("Suggest related wiki pages for a source")
+    .argument("<source>", "filename in 00_Inbox/")
+    .option("--max <n>", "max results", "10")
+    .option("--format <format>", "output format (text|json)", "text")
+    .action(async (source, opts) => {
+      try {
+        const vaultPath = await getVaultPath();
+        const items = await listInbox(vaultPath, "confirmed");
+        const item = items.find((i) => i.filename === source);
+        if (!item) {
+          console.error(`Error: "${source}" is not confirmed. Use "docr inbox confirm" first.`);
+          process.exit(1);
+        }
+        // Analyze the source for query text
+        const analysis = await analyzeSource(item.path, vaultPath);
+        // Get the search index
+        const { index, bodies } = await getOrBuildIndex(vaultPath);
+        const suggestions = await suggestLinks(analysis, index, bodies, {
+          maxResults: parseInt(opts.max),
+        });
+
+        if (opts.format === "json") {
+          console.log(JSON.stringify(suggestions, null, 2));
+          return;
+        }
+
+        if (suggestions.length === 0) {
+          console.log("No related wiki pages found.");
+          return;
+        }
+
+        console.log(`\nRelated pages for "${source}":\n`);
+        for (const s of suggestions) {
+          const name = s.path.split("/").pop();
+          console.log(`  ${s.score.toFixed(2)}  ${s.title}`);
+          console.log(`          ${name}${s.tagOverlap.length ? "  tags: " + s.tagOverlap.join(", ") : ""}`);
+          if (s.snippet) console.log(`          ${s.snippet.slice(0, 100)}`);
+        }
+        console.log();
+      } catch (err) {
+        console.error(`Error: ${err.message}`);
+        process.exit(1);
+      }
+    });
+
+// ── impact ──
+
+  program
+    .command("impact")
+    .description("Preview what pages would be created/updated by ingesting a source")
+    .argument("<source>", "filename in 00_Inbox/")
+    .option("--format <format>", "output format (text|json)", "text")
+    .action(async (source, opts) => {
+      try {
+        const vaultPath = await getVaultPath();
+        const items = await listInbox(vaultPath, "confirmed");
+        const item = items.find((i) => i.filename === source);
+        if (!item) {
+          console.error(`Error: "${source}" is not confirmed. Use "docr inbox confirm" first.`);
+          process.exit(1);
+        }
+        const analysis = await analyzeSource(item.path, vaultPath);
+        const { index, bodies } = await getOrBuildIndex(vaultPath);
+        const suggestions = await suggestLinks(analysis, index, bodies);
+        const impact = await previewImpact(analysis, suggestions, vaultPath);
+
+        if (opts.format === "json") {
+          console.log(JSON.stringify(impact, null, 2));
+          return;
+        }
+
+        console.log(`\n╔══════════════════════════════════════╗`);
+        console.log(`║       INGEST  IMPACT  PREVIEW       ║`);
+        console.log(`╚══════════════════════════════════════╝\n`);
+        console.log(`Source:  ${impact.source}`);
+        console.log(`Type:    ${impact.type}`);
+        console.log(`Words:   ${impact.wordCount}`);
+        if (impact.imageCount) console.log(`Images:  ${impact.imageCount}`);
+        if (impact.hasTemporalData) console.log(`⚠  Contains time-sensitive data`);
+
+        if (impact.wouldCreate.length > 0) {
+          console.log(`\n── Would CREATE (${impact.wouldCreate.length} page(s)) ──`);
+          for (const c of impact.wouldCreate) {
+            console.log(`\n  📄 ${c.title}`);
+            console.log(`     Path:     ${c.path}`);
+            console.log(`     Template: ${c.template}`);
+            console.log(`     Reason:   ${c.reason}`);
+          }
+        }
+
+        if (impact.wouldUpdate.length > 0) {
+          console.log(`\n── Would UPDATE (${impact.wouldUpdate.length} page(s)) ──`);
+          for (const u of impact.wouldUpdate.slice(0, 10)) {
+            const name = u.path.split("/").pop();
+            console.log(`\n  ✏  ${u.title}`);
+            console.log(`     ${name}`);
+            for (const c of u.changes) {
+              console.log(`     - ${c}`);
+            }
+          }
+          if (impact.wouldUpdate.length > 10) {
+            console.log(`\n  ... and ${impact.wouldUpdate.length - 10} more`);
+          }
+        }
+
+        if (impact.affectedEntityPages.length > 0) {
+          console.log(`\n── Affected Entity Pages (${impact.affectedEntityPages.length}) ──`);
+          for (const p of impact.affectedEntityPages) {
+            console.log(`  🏷  ${p.split("/").pop()}`);
+          }
+        }
+
+        console.log(`\nEstimated: ${impact.estimatedPageCount} new page(s), ${impact.wouldUpdate.length} existing page(s) updated`);
+        console.log();
+      } catch (err) {
+        console.error(`Error: ${err.message}`);
+        process.exit(1);
+      }
+    });
+
+  program.parse();

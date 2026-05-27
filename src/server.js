@@ -1,6 +1,10 @@
 import express from "express";
 import { readFile, writeFile } from "node:fs/promises";
 import matter from "gray-matter";
+import { listInbox, confirmInbox, rejectInbox, previewInboxFile, detectType } from "./inbox.js";
+import { analyzeSource } from "./analyze.js";
+import { suggestLinks } from "./suggest.js";
+import { previewImpact } from "./impact.js";
 
 /**
  * Start a simple web UI for browsing and searching indexed docs.
@@ -9,6 +13,17 @@ import matter from "gray-matter";
 export function startServer(index, bodies, port = 3000, files = []) {
   const app = express();
   app.use(express.json());
+
+  function getVaultPath() {
+    for (const f of files) {
+      const p = f.path.replace(/\\/g, "/");
+      const idx = p.indexOf("/wiki/");
+      if (idx !== -1) return p.slice(0, idx);
+      const idx2 = p.indexOf("/00_Inbox/");
+      if (idx2 !== -1) return p.slice(0, idx2);
+    }
+    return "";
+  }
 
   app.get("/", (_req, res) => {
     res.send(`<!DOCTYPE html>
@@ -225,6 +240,8 @@ export function startServer(index, bodies, port = 3000, files = []) {
   .btn-view { background: #e8f0fe; color: #4a90d9; }
   .btn-edit { background: #fff3cd; color: #856404; }
   .btn-approve { background: #d4edda; color: #155724; font-weight: 600; }
+  .btn-confirm { background: #d4edda; color: #155724; font-weight: 600; }
+  .btn-reject { background: #f8d7da; color: #721c24; }
   button:hover { opacity: 0.8; }
   button:disabled { opacity: 0.4; cursor: not-allowed; }
   .modal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 100; justify-content: center; align-items: center; }
@@ -232,20 +249,51 @@ export function startServer(index, bodies, port = 3000, files = []) {
   .modal-content { background: #fff; border-radius: 8px; padding: 1.5rem; width: 90%; max-width: 700px; max-height: 80vh; overflow-y: auto; }
   .modal-content h3 { margin-bottom: 1rem; }
   .modal-content textarea { width: 100%; height: 300px; font-family: monospace; font-size: 0.85rem; padding: 0.75rem; border: 1px solid #ddd; border-radius: 4px; resize: vertical; }
+  .modal-content pre { background: #f5f5f5; padding: 1rem; border-radius: 4px; overflow-x: auto; font-size: 0.8rem; max-height: 50vh; overflow-y: auto; white-space: pre-wrap; word-break: break-all; }
   .modal-content .btns { margin-top: 1rem; display: flex; gap: 0.5rem; justify-content: flex-end; }
   .toast { position: fixed; bottom: 2rem; right: 2rem; background: #333; color: #fff; padding: 0.75rem 1.5rem; border-radius: 6px; z-index: 200; display: none; }
   .toast.show { display: block; }
   .empty { text-align: center; color: #999; padding: 3rem; }
   .nav { margin-bottom: 1rem; }
   .nav a { color: #4a90d9; text-decoration: none; }
+  .tabs { display: flex; gap: 0; margin-bottom: 1.5rem; border-bottom: 2px solid #ddd; }
+  .tab-btn { padding: 0.6rem 1.5rem; border: none; background: none; cursor: pointer; font-size: 0.95rem; color: #888; border-bottom: 2px solid transparent; margin-bottom: -2px; border-radius: 0; }
+  .tab-btn.active { color: #4a90d9; border-bottom-color: #4a90d9; font-weight: 600; }
+  .tab-content { display: none; }
+  .tab-content.active { display: block; }
+  .status-badge { display: inline-block; padding: 0.15rem 0.5rem; border-radius: 10px; font-size: 0.75rem; font-weight: 600; }
+  .status-pending { background: #fff3cd; color: #856404; }
+  .status-confirmed { background: #d4edda; color: #155724; }
+  .status-rejected { background: #f8d7da; color: #721c24; }
+  .inbox-summary { display: flex; gap: 1rem; margin-bottom: 1rem; }
+  .inbox-summary span { background: #fff; border-radius: 6px; padding: 0.4rem 0.8rem; font-size: 0.85rem; box-shadow: 0 1px 2px rgba(0,0,0,0.06); }
 </style></head>
 <body>
   <div class="nav"><a href="/">← 搜索</a> | <a href="/dashboard">仪表盘</a></div>
-  <h1>审核发布</h1>
-  <p class="sub" id="count">加载中...</p>
-  <div id="list"></div>
+  <h1>管理中心</h1>
+
+  <div class="tabs">
+    <button class="tab-btn active" onclick="switchTab('pending')">待发布审核</button>
+    <button class="tab-btn" onclick="switchTab('inbox')">Inbox审核 <span id="inboxBadge"></span></button>
+  </div>
+
+  <!-- Tab 1: Pending Review -->
+  <div class="tab-content active" id="tab-pending">
+    <p class="sub" id="count">加载中...</p>
+    <div id="list"></div>
+  </div>
+
+  <!-- Tab 2: Inbox Review -->
+  <div class="tab-content" id="tab-inbox">
+    <div id="inboxBanner" style="display:none;background:#fff3cd;border:1px solid #ffc107;border-radius:6px;padding:0.75rem 1rem;margin-bottom:1rem;font-size:0.9rem;"></div>
+    <div class="inbox-summary" id="inboxSummary"></div>
+    <div style="margin-bottom:0.75rem;"><button class="btn-view" onclick="loadInbox()">扫描新文件</button></div>
+    <div id="inboxList"></div>
+  </div>
+
   <div class="toast" id="toast"></div>
 
+  <!-- Edit Modal (for pending pages) -->
   <div class="modal" id="editModal">
     <div class="modal-content">
       <h3 id="editTitle">编辑</h3>
@@ -257,11 +305,40 @@ export function startServer(index, bodies, port = 3000, files = []) {
     </div>
   </div>
 
+  <!-- Preview Modal (for inbox items) -->
+  <div class="modal" id="previewModal">
+    <div class="modal-content">
+      <h3 id="previewTitle">预览</h3>
+      <pre id="previewBody"></pre>
+      <div class="btns">
+        <button class="btn-view" onclick="closePreview()">关闭</button>
+      </div>
+    </div>
+  </div>
+
   <script>
+    // ── Shared ──
+    function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+    function showToast(msg) {
+      const t = document.getElementById('toast');
+      t.textContent = msg;
+      t.classList.add('show');
+      setTimeout(() => t.classList.remove('show'), 2500);
+    }
+    function switchTab(tab) {
+      document.querySelectorAll('.tab-btn').forEach((b,i) => {
+        b.classList.toggle('active', (tab==='pending'&&i===0) || (tab==='inbox'&&i===1));
+      });
+      document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+      document.getElementById('tab-' + tab).classList.add('active');
+      if (tab === 'inbox') loadInbox();
+    }
+
+    // ── Pending tab ──
     let currentEditPath = '';
     let pendingPages = [];
 
-    async function load() {
+    async function loadPending() {
       const res = await fetch('/admin/pending');
       const data = await res.json();
       pendingPages = data.pages;
@@ -284,34 +361,19 @@ export function startServer(index, bodies, port = 3000, files = []) {
         '</div></div>'
       ).join('');
     }
-
-    function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
-
-    function preview(i) {
-      window.open('/doc/' + encodeURIComponent(pendingPages[i].path), '_blank');
-    }
-
+    function preview(i) { window.open('/doc/' + encodeURIComponent(pendingPages[i].path), '_blank'); }
     async function approve(i) {
       const p = pendingPages[i];
       if (!confirm('确认发布：' + p.title + '？')) return;
       const btn = event.target;
-      btn.disabled = true;
-      btn.textContent = '处理中...';
+      btn.disabled = true; btn.textContent = '处理中...';
       const res = await fetch('/admin/approve', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ path: p.path })
       });
-      if (res.ok) {
-        showToast('已发布：' + p.title);
-        load();
-      } else {
-        showToast('发布失败');
-        btn.disabled = false;
-        btn.textContent = '审批通过';
-      }
+      if (res.ok) { showToast('已发布：' + p.title); loadPending(); }
+      else { showToast('发布失败'); btn.disabled = false; btn.textContent = '审批通过'; }
     }
-
     async function startEdit(i) {
       const p = pendingPages[i];
       currentEditPath = p.path;
@@ -321,46 +383,150 @@ export function startServer(index, bodies, port = 3000, files = []) {
       document.getElementById('editContent').value = data.content;
       document.getElementById('editModal').classList.add('active');
     }
-
-    function closeEdit() {
-      document.getElementById('editModal').classList.remove('active');
-      currentEditPath = '';
-    }
-
+    function closeEdit() { document.getElementById('editModal').classList.remove('active'); currentEditPath = ''; }
     async function saveEdit() {
       const newContent = document.getElementById('editContent').value;
-      // Save content
       const res = await fetch('/admin/edit', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ path: currentEditPath, content: newContent })
       });
-
       if (res.ok) {
-        // Then approve
         const res2 = await fetch('/admin/approve', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ path: currentEditPath })
         });
-        if (res2.ok) {
-          closeEdit();
-          showToast('已编辑并发布');
-          load();
-        }
-      } else {
-        showToast('保存失败');
+        if (res2.ok) { closeEdit(); showToast('已编辑并发布'); loadPending(); }
+      } else { showToast('保存失败'); }
+    }
+
+    // ── Inbox tab ──
+    let inboxItems = [];
+
+    async function loadInbox() {
+      const res = await fetch('/admin/inbox');
+      const data = await res.json();
+      inboxItems = data.items;
+      // Badge
+      const badge = document.getElementById('inboxBadge');
+      if (data.counts.pending > 0) {
+        badge.textContent = data.counts.pending;
+        badge.style.cssText = 'background:#e6a817;color:#fff;border-radius:10px;padding:0 6px;font-size:0.75rem;margin-left:4px;';
+      } else { badge.textContent = ''; badge.style.cssText = ''; }
+      // Banner
+      const banner = document.getElementById('inboxBanner');
+      if (data.counts.pending > 0) {
+        banner.style.display = 'block';
+        banner.innerHTML = '发现 <strong>' + data.counts.pending + '</strong> 个新文件待预审核，请预览后决定放行或拒绝。';
+      } else { banner.style.display = 'none'; }
+      // Summary
+      document.getElementById('inboxSummary').innerHTML =
+        '<span>总计: <strong>' + data.counts.total + '</strong></span>' +
+        '<span style="color:#856404">待审核: <strong>' + data.counts.pending + '</strong></span>' +
+        '<span style="color:#155724">已放行: <strong>' + data.counts.confirmed + '</strong></span>' +
+        '<span style="color:#721c24">已拒绝: <strong>' + data.counts.rejected + '</strong></span>';
+      // List
+      const list = document.getElementById('inboxList');
+      if (data.items.length === 0) {
+        list.innerHTML = '<div class="empty">Inbox 为空</div>';
+        return;
       }
+      const statusLabel = { pending: '待审核', confirmed: '已放行', rejected: '已拒绝' };
+      list.innerHTML = data.items.map((p, i) => {
+        const badge = '<span class="status-badge status-' + p.status + '">' + (statusLabel[p.status]||p.status) + '</span>';
+        const typeLabel = p.type || 'unknown';
+        const sizeKB = (p.size / 1024).toFixed(1);
+        const actions = p.status === 'pending'
+          ? '<button class="btn-confirm" onclick="confirmInbox(' + i + ')">放行准入</button>' +
+            '<button class="btn-reject" onclick="rejectInbox(' + i + ')">拒绝准入</button>'
+          : (p.status === 'confirmed'
+            ? '<span style="color:#155724;font-size:0.8rem;">已放行 ' + (p.confirmedAt||'').slice(0,10) + '</span>'
+            : '<span style="color:#721c24;font-size:0.8rem;">' + (p.reason ? '原因: '+esc(p.reason.slice(0,50)) : '已拒绝') + '</span>');
+        return '<div class="page">' +
+          '<div class="info">' +
+          '<div class="title">' + esc(p.filename) + ' ' + badge + '</div>' +
+          '<div class="meta">' + typeLabel + ' · ' + sizeKB + ' KB · ' + new Date(p.mtimeMs).toLocaleDateString('zh-CN') + '</div>' +
+          '</div>' +
+          '<div class="actions">' +
+          '<button class="btn-view" onclick="previewInbox(' + i + ')">预览</button>' +
+          actions +
+          '</div></div>';
+      }).join('');
     }
 
-    function showToast(msg) {
-      const t = document.getElementById('toast');
-      t.textContent = msg;
-      t.classList.add('show');
-      setTimeout(() => t.classList.remove('show'), 2500);
+    async function confirmInbox(i) {
+      const p = inboxItems[i];
+      if (!confirm('放行准入：' + p.filename + '？')) return;
+      const res = await fetch('/admin/inbox/confirm', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ filename: p.filename, type: p.type })
+      });
+      if (res.ok) { showToast('已放行：' + p.filename); loadInbox(); }
+      else { showToast('放行失败'); }
     }
 
-    load();
+    async function rejectInbox(i) {
+      const p = inboxItems[i];
+      const reason = prompt('拒绝原因（可选）：');
+      if (reason === null) return;
+      const res = await fetch('/admin/inbox/reject', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ filename: p.filename, reason: reason || '' })
+      });
+      if (res.ok) { showToast('已拒绝：' + p.filename); loadInbox(); }
+      else { showToast('拒绝失败'); }
+    }
+
+    async function previewInbox(i) {
+      const p = inboxItems[i];
+      document.getElementById('previewTitle').textContent = '预览：' + p.filename;
+      document.getElementById('previewBody').innerHTML = '<div style="text-align:center;color:#999;padding:2rem;">加载中...</div>';
+      document.getElementById('previewModal').classList.add('active');
+      // Fetch structured summary
+      let summary;
+      try {
+        const res = await fetch('/admin/inbox/summary/' + encodeURIComponent(p.filename));
+        summary = await res.json();
+      } catch { summary = null; }
+      // Fetch raw text for fallback
+      let raw;
+      try {
+        const res2 = await fetch('/admin/inbox/preview/' + encodeURIComponent(p.filename));
+        raw = await res2.json();
+      } catch { raw = null; }
+
+      const body = document.getElementById('previewBody');
+      if (!summary || summary.error) {
+        body.innerHTML = '<div style="color:#721c24;">无法生成摘要: ' + (summary?.error || raw?.error || 'unknown') + '</div>';
+        return;
+      }
+
+      const ki = summary.keyInfo || {};
+      const sp = summary.suggestedPlacement || {};
+      const sizeStr = summary.size ? (summary.size / 1024).toFixed(1) + ' KB' : '?';
+      const flagHtml = ki.hasTemporalFlag ? '<div style="color:#e6a817;margin-top:0.3rem;">⚠ 包含时效性数据</div>' : '';
+
+      let rawHtml = '';
+      if (raw && !raw.error && raw.preview) {
+        rawHtml = '<details style="margin-top:0.75rem;"><summary style="cursor:pointer;color:#4a90d9;font-size:0.85rem;">查看原文</summary><pre style="background:#f5f5f5;padding:0.75rem;border-radius:4px;overflow-x:auto;font-size:0.75rem;max-height:200px;overflow-y:auto;white-space:pre-wrap;word-break:break-all;margin-top:0.5rem;">' + esc(raw.preview.slice(0, 3000)) + '</pre></details>';
+      }
+
+      body.innerHTML =
+        '<div style="display:grid;grid-template-columns:1fr 1fr;gap:0.5rem;margin-bottom:0.75rem;">' +
+        '<div><span style="color:#888;font-size:0.8rem;">类型</span><br>' + esc(summary.type) + '</div>' +
+        '<div><span style="color:#888;font-size:0.8rem;">格式</span><br>' + esc(summary.format) + '</div>' +
+        '<div><span style="color:#888;font-size:0.8rem;">字数</span><br>' + (summary.wordCount||0) + '</div>' +
+        '<div><span style="color:#888;font-size:0.8rem;">大小</span><br>' + sizeStr + '</div>' +
+        '</div>' +
+        (summary.summary ? '<div style="margin-bottom:0.75rem;"><span style="color:#888;font-size:0.8rem;">摘要</span><br>' + esc(summary.summary) + '</div>' : '') +
+        (ki.scope ? '<div style="margin-bottom:0.75rem;"><span style="color:#888;font-size:0.8rem;">适用对象</span><br>' + esc(ki.scope) + '</div>' : '') +
+        flagHtml +
+        (sp.wikiDir ? '<div style="margin-top:0.75rem;"><span style="color:#888;font-size:0.8rem;">建议放置</span><br>目录: ' + esc(sp.wikiDir) + '<br>文件名: ' + esc(sp.suggestedFilename||'') + '.md<br>模板: ' + esc(sp.template||'') + '</div>' : '') +
+        rawHtml;
+    }
+
+    function closePreview() { document.getElementById('previewModal').classList.remove('active'); }
+
+    loadPending();
   </script>
 </body></html>`);
   });
@@ -471,6 +637,138 @@ export function startServer(index, bodies, port = 3000, files = []) {
     } catch (err) {
       console.error(`Admin edit error: ${err.message}`);
       res.status(500).json({ error: "Edit failed" });
+    }
+  });
+
+  // ── Inbox API ──
+
+  app.get("/admin/inbox", async (_req, res) => {
+    try {
+      const vaultPath = getVaultPath();
+      const items = await listInbox(vaultPath, "all");
+      for (const item of items) {
+        if (!item.type) item.type = detectType(item);
+      }
+      const counts = {
+        total: items.length,
+        pending: items.filter((i) => i.status === "pending").length,
+        confirmed: items.filter((i) => i.status === "confirmed").length,
+        rejected: items.filter((i) => i.status === "rejected").length,
+      };
+      res.json({ items, counts });
+    } catch (err) {
+      console.error(`Inbox list error: ${err.message}`);
+      res.status(500).json({ error: "Failed" });
+    }
+  });
+
+  app.get("/admin/inbox/preview/:filename", async (req, res) => {
+    try {
+      const vaultPath = getVaultPath();
+      const { join } = await import("node:path");
+      const filePath = join(vaultPath, "00_Inbox", decodeURIComponent(req.params.filename));
+      const result = await previewInboxFile(filePath);
+      res.json(result);
+    } catch (err) {
+      console.error(`Inbox preview error: ${err.message}`);
+      res.status(500).json({ error: "Preview failed" });
+    }
+  });
+
+  app.get("/admin/inbox/summary/:filename", async (req, res) => {
+    try {
+      const vaultPath = getVaultPath();
+      const { join } = await import("node:path");
+      const filePath = join(vaultPath, "00_Inbox", decodeURIComponent(req.params.filename));
+      const result = await analyzeSource(filePath, vaultPath);
+      res.json(result);
+    } catch (err) {
+      console.error(`Inbox summary error: ${err.message}`);
+      res.status(500).json({ error: "Summary failed" });
+    }
+  });
+
+  app.post("/admin/inbox/confirm", async (req, res) => {
+    try {
+      const { filename, type, notes } = req.body || {};
+      if (!filename) return res.status(400).json({ error: "filename required" });
+      const vaultPath = getVaultPath();
+      await confirmInbox(vaultPath, filename, { type, notes });
+      res.json({ ok: true, filename, status: "confirmed" });
+    } catch (err) {
+      console.error(`Inbox confirm error: ${err.message}`);
+      res.status(500).json({ error: "Confirm failed" });
+    }
+  });
+
+  app.post("/admin/inbox/reject", async (req, res) => {
+    try {
+      const { filename, reason } = req.body || {};
+      if (!filename) return res.status(400).json({ error: "filename required" });
+      const vaultPath = getVaultPath();
+      await rejectInbox(vaultPath, filename, reason || "");
+      res.json({ ok: true, filename, status: "rejected" });
+    } catch (err) {
+      console.error(`Inbox reject error: ${err.message}`);
+      res.status(500).json({ error: "Reject failed" });
+    }
+  });
+
+  app.post("/admin/inbox/analyze/:filename", async (req, res) => {
+    try {
+      const vaultPath = getVaultPath();
+      const { join } = await import("node:path");
+      const filename = decodeURIComponent(req.params.filename);
+      const filePath = join(vaultPath, "00_Inbox", filename);
+      // Check confirmed
+      const items = await listInbox(vaultPath, "confirmed");
+      if (!items.find((i) => i.filename === filename)) {
+        return res.status(400).json({ error: "Source not confirmed" });
+      }
+      const result = await analyzeSource(filePath, vaultPath);
+      res.json(result);
+    } catch (err) {
+      console.error(`Inbox analyze error: ${err.message}`);
+      res.status(500).json({ error: "Analyze failed" });
+    }
+  });
+
+  app.post("/admin/inbox/suggest/:filename", async (req, res) => {
+    try {
+      const vaultPath = getVaultPath();
+      const { join } = await import("node:path");
+      const filename = decodeURIComponent(req.params.filename);
+      const filePath = join(vaultPath, "00_Inbox", filename);
+      const items = await listInbox(vaultPath, "confirmed");
+      if (!items.find((i) => i.filename === filename)) {
+        return res.status(400).json({ error: "Source not confirmed" });
+      }
+      const analysis = await analyzeSource(filePath, vaultPath);
+      const result = await suggestLinks(analysis, index, bodies, { maxResults: 10 });
+      res.json(result);
+    } catch (err) {
+      console.error(`Inbox suggest error: ${err.message}`);
+      res.status(500).json({ error: "Suggest failed" });
+    }
+  });
+
+  app.post("/admin/inbox/impact/:filename", async (req, res) => {
+    try {
+      const vaultPath = getVaultPath();
+      const { join } = await import("node:path");
+      const filename = decodeURIComponent(req.params.filename);
+      const filePath = join(vaultPath, "00_Inbox", filename);
+      const items = await listInbox(vaultPath, "confirmed");
+      if (!items.find((i) => i.filename === filename)) {
+        return res.status(400).json({ error: "Source not confirmed" });
+      }
+      const analysis = await analyzeSource(filePath, vaultPath);
+      const suggestions = await suggestLinks(analysis, index, bodies);
+      const result = await previewImpact(analysis, suggestions, vaultPath);
+      res.json(result);
+    } catch (err) {
+      console.error(`Inbox impact error: ${err.message}`);
+      res.status(500).json({ error: "Impact failed" });
     }
   });
 
