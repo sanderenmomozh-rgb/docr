@@ -6,6 +6,7 @@ import { analyzeSource } from "./analyze.js";
 import { suggestLinks } from "./suggest.js";
 import { previewImpact } from "./impact.js";
 import { executeIngest } from "./ingest.js";
+import { scanDirectory } from "./scanner.js";
 
 /**
  * Start a simple web UI for browsing and searching indexed docs.
@@ -606,23 +607,33 @@ export function startServer(index, bodies, port = 3000, files = []) {
 
   app.get("/admin/pending", async (_req, res) => {
     try {
+      const vaultPath = getVaultPath();
+      // Fresh scan — picks up pages created after server start
+      const currentFiles = await scanDirectory(vaultPath, {
+        ignorePatterns: [".obsidian", ".trash", ".docr-cache"],
+      });
+
       const pending = [];
-      for (const f of files) {
-        const entry = bodies.get(f.path);
-        if (!entry) continue;
+      for (const f of currentFiles) {
         const isTemplate = f.path.includes("/templates/") || f.path.includes("\\templates\\");
         if (isTemplate) continue;
-        const fm = entry.frontmatter || {};
-        if (fm.status === "draft-pending-review") {
-          pending.push({
-            path: f.path,
-            filename: f.path.split("/").pop(),
-            title: fm.title || f.path.split("/").pop().replace(".md", ""),
-            tags: fm.tags || [],
-            scope: fm.scope || "",
-            date: fm.date || "",
-            reviewer: fm.reviewer || "",
-          });
+        try {
+          const raw = await readFile(f.path, "utf-8");
+          const parsed = matter(raw);
+          const fm = parsed.data || {};
+          if (fm.status === "draft-pending-review") {
+            pending.push({
+              path: f.path,
+              filename: f.path.split("/").pop(),
+              title: fm.title || f.path.split("/").pop().replace(".md", ""),
+              tags: fm.tags || [],
+              scope: fm.scope || "",
+              date: fm.date || "",
+              reviewer: fm.reviewer || "",
+            });
+          }
+        } catch {
+          // skip unreadable files
         }
       }
       res.json({ total: pending.length, pages: pending });
