@@ -1,4 +1,4 @@
-import { readFile, writeFile, mkdir } from "node:fs/promises";
+import { readFile, writeFile, mkdir, readdir, stat } from "node:fs/promises";
 import { dirname, join, basename, relative } from "node:path";
 import { analyzeSource } from "./analyze.js";
 import { suggestLinks } from "./suggest.js";
@@ -49,13 +49,33 @@ export async function executeIngest(filePath, vaultPath, index, bodies, opts = {
     }
   }
 
+  // Check for potential duplicates (different path, same source content)
+  let duplicates = [];
+  if (!force) {
+    duplicates = await findPotentialDuplicates(analysis, vaultPath);
+  }
+
   if (dryRun) {
     return {
       source: analysis.filename,
       type: analysis.type,
       created: toCreate.map((p) => ({ ...p, body: p.body.slice(0, 200) + "..." })),
       updated: suggestions.filter((s) => s.score > 0.4).map((s) => ({ path: s.path, changes: ["交叉引用更新"] })),
+      duplicates,
       dryRun: true,
+    };
+  }
+
+  if (duplicates.length > 0) {
+    return {
+      source: analysis.filename,
+      type: analysis.type,
+      created: [],
+      updated: [],
+      skipped: true,
+      reason: `potential duplicates found in raw/specs/ — ${duplicates.length} existing file(s) may cover the same source`,
+      duplicates,
+      dryRun: false,
     };
   }
 
@@ -81,8 +101,137 @@ export async function executeIngest(filePath, vaultPath, index, bodies, opts = {
     type: analysis.type,
     created,
     updated: suggestions.filter((s) => s.score > 0.4).map((s) => ({ path: s.path, changes: ["交叉引用更新"] })),
+    duplicates: [],
     dryRun: false,
   };
+}
+
+/**
+ * Scan raw/specs/ for existing files that may cover the same source.
+ * Returns a list of { path, reasons[] } for each potential duplicate found.
+ */
+async function findPotentialDuplicates(analysis, vaultPath) {
+  const specsDir = join(vaultPath, "raw", "specs");
+  const existing = [];
+
+  // Collect all .md files under raw/specs/ recursively
+  async function walk(dir) {
+    let entries;
+    try {
+      entries = await readdir(dir, { withFileTypes: true });
+    } catch {
+      return; // dir doesn't exist — no duplicates
+    }
+    for (const ent of entries) {
+      const full = join(dir, ent.name);
+      if (ent.isDirectory()) {
+        await walk(full);
+      } else if (ent.isFile() && ent.name.endsWith(".md")) {
+        existing.push(full);
+      }
+    }
+  }
+  await walk(specsDir);
+
+  if (existing.length === 0) return [];
+
+  const sourceName = analysis.filename.replace(/\.[^.]+$/, ""); // strip extension
+  const sourceTokens = tokenize(sourceName);
+  const incomingHeaders = (analysis.csvHeaders || []).filter(Boolean).map((h) => h.trim());
+
+  const results = [];
+
+  for (const filePath of existing) {
+    const reasons = [];
+    let content;
+    try {
+      content = await readFile(filePath, "utf-8");
+    } catch {
+      continue;
+    }
+
+    // 1. Check source reference line (e.g. "来源：xxx.csv")
+    const sourceMatch = content.match(/来源[：:]\s*(.+)/);
+    if (sourceMatch) {
+      const refSource = sourceMatch[1].trim().replace(/\.[^.]+$/, "");
+      if (refSource === sourceName) {
+        reasons.push("相同来源 — 来源行指向同一个文件");
+      } else {
+        // Fuzzy: check token overlap of source names
+        const refTokens = tokenize(refSource);
+        const overlap = intersection(sourceTokens, refTokens);
+        if (overlap.length >= Math.min(sourceTokens.length, refTokens.length) * 0.5) {
+          reasons.push(`来源相似 — 来源行指向 "${refSource}" (关键词重叠: ${overlap.slice(0, 3).join(", ")})`);
+        }
+      }
+    }
+
+    // 2. For field-spec: compare field name overlap with existing table headers
+    if (analysis.type === "field-spec" && incomingHeaders.length > 0) {
+      const existingFields = extractFieldNames(content);
+      if (existingFields.length > 0) {
+        const matchCount = incomingHeaders.filter((h) =>
+          existingFields.some((ef) => ef === h || ef.includes(h) || h.includes(ef))
+        ).length;
+        const overlapPct = Math.round((matchCount / Math.max(incomingHeaders.length, existingFields.length)) * 100);
+        if (overlapPct >= 40) {
+          reasons.push(`字段重叠度 ${overlapPct}% (${matchCount}/${Math.max(incomingHeaders.length, existingFields.length)})`);
+        }
+      }
+    }
+
+    // 3. Filename similarity (token-based)
+    const existName = basename(filePath, ".md");
+    const existTokens = tokenize(existName);
+    const nameOverlap = intersection(sourceTokens, existTokens);
+    if (nameOverlap.length >= 3) {
+      reasons.push(`文件名关键词重叠: ${nameOverlap.slice(0, 5).join(", ")}`);
+    }
+
+    if (reasons.length > 0) {
+      results.push({
+        path: relative(vaultPath, filePath).replace(/\\/g, "/"),
+        reasons,
+      });
+    }
+  }
+
+  return results;
+}
+
+/**
+ * Tokenize a string into meaningful keywords.
+ * Splits on common delimiters and filters out short noise tokens.
+ */
+function tokenize(str) {
+  return str
+    .replace(/[（(][^)）]*[)）]/g, "") // remove parenthetical content
+    .split(/[\s\-—,，、]+/)
+    .map((t) => t.trim())
+    .filter((t) => t.length >= 2);
+}
+
+function intersection(a, b) {
+  const setB = new Set(b);
+  return [...new Set(a)].filter((x) => setB.has(x));
+}
+
+/**
+ * Extract field names from a field-spec markdown table.
+ * Looks for the first table in a "## 字段定义" section.
+ */
+function extractFieldNames(content) {
+  // Find the field definition section
+  const sectionMatch = content.match(/##\s*字段定义\s*\n+(\|[^\n]+\|\n\|[|\-\s]+\|\n((?:\|.+\|\n?)*))/);
+  if (!sectionMatch) return [];
+
+  const headerRow = sectionMatch[1].split(/\n/)[0];
+  if (!headerRow) return [];
+
+  return headerRow
+    .split("|")
+    .map((c) => c.trim())
+    .filter((c) => c && c !== "—" && c !== "------");
 }
 
 function buildPagePlan(analysis, sp, vaultPath) {

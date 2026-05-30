@@ -737,7 +737,18 @@ program
         });
 
         if (result.skipped) {
-          console.log(`Skipped: ${result.reason}`);
+          console.log(`\n⚠  Skipped: ${result.reason}`);
+          if (result.duplicates && result.duplicates.length > 0) {
+            console.log();
+            for (const dup of result.duplicates) {
+              console.log(`  ${dup.path}`);
+              for (const reason of dup.reasons) {
+                console.log(`    ↳ ${reason}`);
+              }
+              console.log();
+            }
+            console.log(`Use --force to ingest anyway, or review the existing files first.`);
+          }
           return;
         }
 
@@ -781,6 +792,17 @@ program
           if (result.updated.length > 5) {
             console.log(`  ... and ${result.updated.length - 5} more`);
           }
+        }
+
+        if (result.duplicates && result.duplicates.length > 0) {
+          console.log(`\n── ⚠ Potential Duplicates (${result.duplicates.length}) ──`);
+          for (const dup of result.duplicates) {
+            console.log(`\n  ${dup.path}`);
+            for (const reason of dup.reasons) {
+              console.log(`    ↳ ${reason}`);
+            }
+          }
+          console.log(`\n  Use --force to ingest anyway.`);
         }
 
         if (result.dryRun) {

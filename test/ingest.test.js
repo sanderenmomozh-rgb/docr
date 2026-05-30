@@ -146,4 +146,78 @@ describe("executeIngest", () => {
 
     await rm(vault, { recursive: true, force: true });
   });
+
+  // ── Duplicate detection ──
+
+  it("skips when potential duplicate found by same source reference", async () => {
+    const csvContent = "字段名,取值逻辑,码值\n姓名,取员工主数据,是";
+    const vault = await setupVault({ "工单信息集 - 测试表单.csv": csvContent });
+
+    // Pre-create a spec file that references the same source
+    const specDir = join(vault, "raw", "specs", "SSC测试");
+    await mkdir(specDir, { recursive: true });
+    await writeFile(join(specDir, "字段逻辑-测试表单.md"),
+      "# 字段逻辑-测试表单\n\n来源：工单信息集 - 测试表单.csv\n\n## 字段定义\n\n| 字段名 | 取值逻辑 | 码值 |\n|------|------|------|\n| 姓名 | 取员工主数据 | 是 |\n");
+
+    const filePath = join(vault, "00_Inbox", "工单信息集 - 测试表单.csv");
+    await confirmInbox(vault, "工单信息集 - 测试表单.csv");
+
+    const { index, bodies } = await buildIndex([]);
+    const result = await executeIngest(filePath, vault, index, bodies);
+
+    assert.ok(result.skipped);
+    assert.ok(result.reason.includes("potential duplicates"));
+    assert.ok(result.duplicates.length >= 1);
+    const dup = result.duplicates[0];
+    assert.ok(dup.path.includes("字段逻辑-测试表单"));
+    assert.ok(dup.reasons.some((r) => r.includes("相同来源")));
+
+    await rm(vault, { recursive: true, force: true });
+  });
+
+  it("skips when field names overlap significantly", async () => {
+    const csvContent = "字段名,取值逻辑,码值,必填\n姓名,取员工主数据,是,是\n部门,取组织架构,是,是";
+    const vault = await setupVault({ "测试字段.csv": csvContent });
+
+    // Pre-create a spec file with overlapping field names
+    const specDir = join(vault, "raw", "specs");
+    await mkdir(specDir, { recursive: true });
+    await writeFile(join(specDir, "字段逻辑-旧版本.md"),
+      "# 字段逻辑-旧版本\n\n来源：其他文件.csv\n\n## 字段定义\n\n| 字段名 | 取值逻辑 | 码值 | 必填 |\n|------|------|------|------|\n| 姓名 | 取员工主数据 | 是 | 是 |\n| 部门 | 取组织架构 | 是 | 是 |\n");
+
+    const filePath = join(vault, "00_Inbox", "测试字段.csv");
+    await confirmInbox(vault, "测试字段.csv");
+
+    const { index, bodies } = await buildIndex([]);
+    const result = await executeIngest(filePath, vault, index, bodies);
+
+    assert.ok(result.skipped);
+    assert.ok(result.duplicates.length >= 1);
+    assert.ok(result.duplicates[0].reasons.some((r) => r.includes("字段重叠度")));
+
+    await rm(vault, { recursive: true, force: true });
+  });
+
+  it("--force bypasses duplicate detection", async () => {
+    const csvContent = "字段名,取值逻辑\n姓名,取员工主数据";
+    const vault = await setupVault({ "force-test.csv": csvContent });
+
+    // Pre-create a spec file with same source
+    const specDir = join(vault, "raw", "specs");
+    await mkdir(specDir, { recursive: true });
+    await writeFile(join(specDir, "字段逻辑-force-test.md"),
+      "# 字段逻辑-force-test\n\n来源：force-test.csv\n\n## 字段定义\n\n| 字段名 | 取值逻辑 |\n|------|------|\n| 姓名 | 取员工主数据 |\n");
+
+    const filePath = join(vault, "00_Inbox", "force-test.csv");
+    await confirmInbox(vault, "force-test.csv");
+
+    const { index, bodies } = await buildIndex([]);
+    const result = await executeIngest(filePath, vault, index, bodies, { force: true });
+
+    // With --force, should proceed and create the file (not skip)
+    assert.ok(!result.skipped);
+    assert.ok(result.duplicates.length === 0 || result.created.length > 0);
+
+    await rm(vault, { recursive: true, force: true });
+  });
 });
