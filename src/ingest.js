@@ -1,5 +1,5 @@
 import { readFile, writeFile, mkdir } from "node:fs/promises";
-import { dirname, join, basename } from "node:path";
+import { dirname, join, basename, relative } from "node:path";
 import { analyzeSource } from "./analyze.js";
 import { suggestLinks } from "./suggest.js";
 import { markIngested } from "./inbox.js";
@@ -93,9 +93,9 @@ function buildPagePlan(analysis, sp, vaultPath) {
     case "field-spec": {
       const body = generateFieldSpecContent(analysis);
       pages.push({
-        path: join(vaultPath, "raw", "specs", `${sp.suggestedFilename}.md`).replace(/\\/g, "/"),
+        path: `${sp.wikiDir}/${sp.suggestedFilename}.md`.replace(/\\/g, "/"),
         title: sp.suggestedFilename,
-        template: "raw/specs (Layer 1)",
+        template: sp.template || "raw/specs (Layer 1)",
         frontmatter: {}, // raw/specs has no wiki frontmatter
         body,
       });
@@ -414,8 +414,10 @@ async function updateIndexMd(vaultPath, pages) {
   const today = new Date().toISOString().slice(0, 10);
   let entry = `\n## ${today} ingest\n`;
   for (const page of pages) {
-    const name = basename(page.path, ".md");
-    entry += `- [[${name}]] — ${page.template}\n`;
+    // Use vault-relative path for wikilink so cross-directory links resolve correctly
+    const vaultRel = join("", relative(vaultPath, page.path).replace(/\\/g, "/")).replace(/^\//, "");
+    const linkTarget = vaultRel.replace(/\.md$/, "");
+    entry += `- [[${linkTarget}]] — ${page.template}\n`;
   }
 
   await writeFile(indexPath, content + entry, "utf-8");
@@ -424,7 +426,11 @@ async function updateIndexMd(vaultPath, pages) {
 async function appendLogMd(vaultPath, sourceFile, pages) {
   const logPath = join(vaultPath, "wiki", "_log.md");
   const today = new Date().toISOString().slice(0, 10);
-  const pageLinks = pages.map((p) => `[[${basename(p.path, ".md")}]]`).join(", ");
+  const pageLinks = pages.map((p) => {
+    // Use vault-relative path for wikilink so cross-directory links resolve correctly
+    const vaultRel = join("", relative(vaultPath, p.path).replace(/\\/g, "/")).replace(/^\//, "");
+    return `[[${vaultRel.replace(/\.md$/, "")}]]`;
+  }).join(", ");
 
   const entry = `\n## [${today}] ingest | ${sourceFile} | ${pages.length} page(s)\n- Created: ${pageLinks}\n`;
 

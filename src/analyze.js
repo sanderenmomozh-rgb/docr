@@ -213,7 +213,16 @@ function suggestPlacement(type, filename, vaultPath) {
         suggestedFilename: `${base} - 标准解答`,
         template: "tpl-answer.md",
       };
-    case "field-spec":
+    case "field-spec": {
+      // Use 字段逻辑-<topic> naming convention for raw field specifications
+      // Strip common CSV category prefix (e.g. "咨询服务工单信息集 - ") to get short topic
+      const shortName = extractFieldSpecName(base);
+      return {
+        wikiDir: join(vaultPath, "raw", "specs").replace(/\\/g, "/"),
+        suggestedFilename: `字段逻辑-${shortName}`,
+        template: "raw/specs (Layer 1)",
+      };
+    }
     case "system-spec":
       return {
         wikiDir: join(wikiDir, "features").replace(/\\/g, "/"),
@@ -240,6 +249,34 @@ function suggestPlacement(type, filename, vaultPath) {
         template: "tpl-answer.md",
       };
   }
+}
+
+/**
+ * Extract a short topic name from a CSV filename for field-spec naming.
+ * Strips common category prefixes like "咨询服务工单信息集 - " to get the core topic.
+ * Falls back to the original base name if no " - " separator is found.
+ */
+function extractFieldSpecName(base) {
+  // Common category prefixes seen in HRSSC data exports
+  const knownPrefixes = [
+    "咨询服务工单信息集",
+    "HR服务工单信息集",
+    "工单信息集",
+  ];
+
+  for (const prefix of knownPrefixes) {
+    if (base.startsWith(prefix) && base.length > prefix.length + 3) {
+      // Strip "prefix - " or "prefix — "
+      const rest = base.slice(prefix.length).replace(/^[\s]*[-—][\s]*/, "");
+      if (rest.length > 0) return rest;
+    }
+  }
+
+  // Generic fallback: if base has " - " separator, take the part after the first one
+  const sepMatch = base.match(/^[^-—]+[-—]\s*(.+)$/);
+  if (sepMatch && sepMatch[1].length > 0) return sepMatch[1];
+
+  return base;
 }
 
 // ── Helpers ──
