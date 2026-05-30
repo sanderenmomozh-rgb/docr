@@ -1,6 +1,6 @@
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert";
-import { mkdtemp, rm, writeFile, mkdir } from "node:fs/promises";
+import { mkdtemp, rm, writeFile, mkdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -14,6 +14,7 @@ import {
   detectType,
   previewInboxFile,
   summarizeInboxFile,
+  archiveSource,
 } from "../src/inbox.js";
 
 let tmpDir;
@@ -283,6 +284,69 @@ describe("summarizeInboxFile", () => {
     await assert.rejects(
       async () => { await summarizeInboxFile(filePath, vault); }
     );
+    await rm(vault, { recursive: true, force: true });
+  });
+});
+
+// ── archiveSource ──
+
+describe("archiveSource", () => {
+  it("moves file from 00_Inbox/ to raw/sources/", async () => {
+    const vault = await setupVault({ "test.csv": "col1,col2\nval1,val2" });
+    const srcPath = join(vault, "00_Inbox", "test.csv");
+
+    const destPath = await archiveSource(vault, "test.csv");
+
+    // File should be gone from inbox
+    await assert.rejects(async () => { await readFile(srcPath, "utf-8"); });
+
+    // File should exist at destination
+    const archived = await readFile(destPath, "utf-8");
+    assert.ok(archived.includes("col1,col2"));
+
+    // Path should be in raw/sources/
+    assert.ok(destPath.replace(/\\/g, "/").includes("raw/sources/test.csv"));
+
+    await rm(vault, { recursive: true, force: true });
+  });
+
+  it("handles filename conflict with date suffix", async () => {
+    const vault = await setupVault({ "spec.csv": "a,b\n1,2" });
+    // Pre-create a file at the target location
+    const sourcesDir = join(vault, "raw", "sources");
+    await mkdir(sourcesDir, { recursive: true });
+    await writeFile(join(sourcesDir, "spec.csv"), "existing content");
+
+    const destPath = await archiveSource(vault, "spec.csv");
+
+    // Should have date suffix to avoid conflict
+    const destName = destPath.split("/").pop();
+    assert.ok(destName !== "spec.csv");
+    assert.ok(destName.includes("spec"));
+    assert.ok(destName.includes(".csv"));
+
+    // Both files should exist
+    const original = await readFile(join(sourcesDir, "spec.csv"), "utf-8");
+    assert.strictEqual(original, "existing content");
+
+    await rm(vault, { recursive: true, force: true });
+  });
+
+  it("recorded as ingested in inbox list with archived path", async () => {
+    const vault = await setupVault({ "archive-me.csv": "a,b\n1,2" });
+
+    // Mark as ingested first (simulating full ingest flow)
+    const { markIngested } = await import("../src/inbox.js");
+    await markIngested(vault, "archive-me.csv");
+    const destPath = await archiveSource(vault, "archive-me.csv");
+
+    // Should appear in inbox list with ingested status
+    const items = await listInbox(vault, "all");
+    const item = items.find((i) => i.filename === "archive-me.csv");
+    assert.ok(item);
+    assert.strictEqual(item.status, "ingested");
+    assert.ok(item.archivedPath);
+
     await rm(vault, { recursive: true, force: true });
   });
 });

@@ -130,14 +130,15 @@ describe("executeIngest", () => {
     const filePath = join(vault, "00_Inbox", "dup.csv");
     await confirmInbox(vault, "dup.csv");
 
-    // First ingest succeeds
+    // First ingest succeeds (and archives the source)
     const { index, bodies } = await buildIndex([]);
     let result = await executeIngest(filePath, vault, index, bodies);
 
     if (!result.skipped) {
-      // Re-confirm to allow second ingest attempt
+      // Re-create source in inbox (first ingest archived it to raw/sources/)
+      await writeFile(filePath, csvContent);
       await confirmInbox(vault, "dup.csv");
-      // Second ingest without --force should fail
+      // Second ingest without --force should fail because the page already exists
       await assert.rejects(
         async () => { await executeIngest(filePath, vault, index, bodies); },
         /already exists/
@@ -217,6 +218,53 @@ describe("executeIngest", () => {
     // With --force, should proceed and create the file (not skip)
     assert.ok(!result.skipped);
     assert.ok(result.duplicates.length === 0 || result.created.length > 0);
+
+    await rm(vault, { recursive: true, force: true });
+  });
+
+  // ── Source archiving ──
+
+  it("archives source file to raw/sources/ after successful ingest", async () => {
+    const csvContent = "字段名,取值逻辑\n姓名,取员工主数据";
+    const vault = await setupVault({ "archive-test.csv": csvContent });
+    const filePath = join(vault, "00_Inbox", "archive-test.csv");
+    await confirmInbox(vault, "archive-test.csv");
+
+    const { index, bodies } = await buildIndex([]);
+    const result = await executeIngest(filePath, vault, index, bodies);
+
+    if (!result.skipped) {
+      // archivedPath is vault-relative
+      assert.ok(result.archivedPath);
+      assert.ok(result.archivedPath.includes("raw/sources/archive-test"));
+
+      // Should no longer exist in inbox
+      await assert.rejects(async () => { await readFile(filePath, "utf-8"); });
+
+      // Should exist at archive location (vault-relative path)
+      const archived = await readFile(join(vault, result.archivedPath), "utf-8");
+      assert.ok(archived.includes("字段名"));
+    }
+
+    await rm(vault, { recursive: true, force: true });
+  });
+
+  it("dry-run shows wouldArchive without moving file", async () => {
+    const csvContent = "字段名,取值逻辑\n姓名,取员工主数据";
+    const vault = await setupVault({ "dry-archive.csv": csvContent });
+    const filePath = join(vault, "00_Inbox", "dry-archive.csv");
+    await confirmInbox(vault, "dry-archive.csv");
+
+    const { index, bodies } = await buildIndex([]);
+    const result = await executeIngest(filePath, vault, index, bodies, { dryRun: true });
+
+    assert.ok(result.dryRun);
+    assert.ok(result.wouldArchive);
+    assert.ok(result.wouldArchive.includes("raw/sources/dry-archive"));
+
+    // File should still be in inbox (not moved)
+    const inboxContent = await readFile(filePath, "utf-8");
+    assert.ok(inboxContent.includes("字段名"));
 
     await rm(vault, { recursive: true, force: true });
   });

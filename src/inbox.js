@@ -1,5 +1,5 @@
-import { readdir, stat, readFile, writeFile, rename } from "node:fs/promises";
-import { join, extname } from "node:path";
+import { readdir, stat, readFile, writeFile, rename, mkdir } from "node:fs/promises";
+import { join, extname, basename } from "node:path";
 import { analyzeSource } from "./analyze.js";
 
 const STATE_FILENAME = ".docr-inbox-state.json";
@@ -67,15 +67,18 @@ export async function listInbox(vaultPath, filter = "all") {
 
   const currentFilenames = new Set(files.map((f) => f.filename));
 
-  // Prune stale entries
+  // Prune stale entries — but keep archived/ingested items whose files were moved
   let pruned = false;
   for (const key of Object.keys(state.items)) {
-    if (!currentFilenames.has(key)) {
+    const entry = state.items[key];
+    // Only prune entries for files that are truly gone (not archived/moved)
+    if (!currentFilenames.has(key) && entry.status !== "ingested" && entry.status !== "archived") {
       delete state.items[key];
       pruned = true;
     }
   }
 
+  // Build results from physical files
   const results = files.map((f) => {
     const entry = state.items[f.filename] || { status: "pending" };
     return {
@@ -87,8 +90,30 @@ export async function listInbox(vaultPath, filter = "all") {
       confirmedBy: entry.confirmedBy || null,
       type: entry.type || null,
       notes: entry.notes || null,
+      archivedPath: entry.archivedPath || null,
     };
   });
+
+  // Also include ingested/archived items whose files have been moved out of inbox
+  for (const [filename, entry] of Object.entries(state.items)) {
+    if (!currentFilenames.has(filename) && (entry.status === "ingested" || entry.status === "archived")) {
+      results.push({
+        filename,
+        path: entry.archivedPath || "",
+        ext: extname(filename).toLowerCase(),
+        size: 0,
+        mtimeMs: 0,
+        status: entry.status,
+        confirmedAt: entry.confirmedAt || null,
+        rejectedAt: null,
+        reason: null,
+        confirmedBy: null,
+        type: entry.type || null,
+        notes: null,
+        archivedPath: entry.archivedPath || null,
+      });
+    }
+  }
 
   if (pruned) {
     const newState = { version: state.version, items: {} };
@@ -101,6 +126,7 @@ export async function listInbox(vaultPath, filter = "all") {
         confirmedBy: r.confirmedBy,
         type: r.type,
         notes: r.notes,
+        archivedPath: r.archivedPath,
       };
     }
     await saveInboxState(vaultPath, newState);
@@ -157,6 +183,42 @@ export async function markIngested(vaultPath, filename) {
   };
 
   await saveInboxState(vaultPath, state);
+}
+
+/**
+ * Archive a source file from 00_Inbox/ to raw/sources/ after successful ingest.
+ * Handles filename conflicts by appending a date suffix.
+ * @returns {string} the relative path of the archived file (from vault root)
+ */
+export async function archiveSource(vaultPath, filename) {
+  const sourcesDir = join(vaultPath, "raw", "sources");
+  await mkdir(sourcesDir, { recursive: true });
+
+  const srcPath = join(vaultPath, "00_Inbox", filename);
+  let destPath = join(sourcesDir, filename);
+
+  // Handle filename conflicts: append date suffix before extension
+  try {
+    await stat(destPath);
+    // File exists — add timestamp
+    const ext = extname(filename);
+    const base = basename(filename, ext);
+    const dateSuffix = new Date().toISOString().slice(0, 10).replace(/-/g, "");
+    destPath = join(sourcesDir, `${base}-${dateSuffix}${ext}`);
+  } catch {
+    // File doesn't exist — path is good as-is
+  }
+
+  await rename(srcPath, destPath);
+
+  // Record archive path in state
+  const state = await loadInboxState(vaultPath);
+  if (state.items[filename]) {
+    state.items[filename].archivedPath = destPath.replace(/\\/g, "/");
+  }
+  await saveInboxState(vaultPath, state);
+
+  return destPath;
 }
 
 // ── Type detection ──

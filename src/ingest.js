@@ -2,7 +2,7 @@ import { readFile, writeFile, mkdir, readdir, stat } from "node:fs/promises";
 import { dirname, join, basename, relative } from "node:path";
 import { analyzeSource } from "./analyze.js";
 import { suggestLinks } from "./suggest.js";
-import { markIngested } from "./inbox.js";
+import { markIngested, archiveSource } from "./inbox.js";
 
 /**
  * Execute ingest: create wiki pages, update index/log, mark source as ingested.
@@ -62,6 +62,7 @@ export async function executeIngest(filePath, vaultPath, index, bodies, opts = {
       created: toCreate.map((p) => ({ ...p, body: p.body.slice(0, 200) + "..." })),
       updated: suggestions.filter((s) => s.score > 0.4).map((s) => ({ path: s.path, changes: ["交叉引用更新"] })),
       duplicates,
+      wouldArchive: `raw/sources/${analysis.filename}`,
       dryRun: true,
     };
   }
@@ -96,12 +97,16 @@ export async function executeIngest(filePath, vaultPath, index, bodies, opts = {
   // Mark source as ingested
   await markIngested(vaultPath, analysis.filename);
 
+  // Archive source file from 00_Inbox/ to raw/sources/
+  const archivedPath = await archiveSource(vaultPath, analysis.filename);
+
   return {
     source: analysis.filename,
     type: analysis.type,
     created,
     updated: suggestions.filter((s) => s.score > 0.4).map((s) => ({ path: s.path, changes: ["交叉引用更新"] })),
     duplicates: [],
+    archivedPath: relative(vaultPath, archivedPath).replace(/\\/g, "/"),
     dryRun: false,
   };
 }

@@ -405,7 +405,7 @@ program
               console.log("Inbox is empty.");
               return;
             }
-            const statusLabel = { pending: "⏳", confirmed: "✅", rejected: "❌" };
+            const statusLabel = { pending: "⏳", confirmed: "✅", rejected: "❌", ingested: "📦", archived: "📦" };
             for (const item of items) {
               const icon = statusLabel[item.status] || "  ";
               const typeLabel = item.type || detectType(item);
@@ -769,6 +769,11 @@ program
 
         console.log(`Source:  ${result.source}`);
         console.log(`Type:    ${result.type}`);
+        if (result.archivedPath) {
+          console.log(`Archive: ${result.archivedPath}`);
+        } else if (result.wouldArchive) {
+          console.log(`Archive: ${result.wouldArchive}  (dry-run)`);
+        }
 
         if (result.created.length > 0) {
           console.log(`\n── Created (${result.created.length} page(s)) ──`);
