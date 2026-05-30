@@ -5,6 +5,7 @@ import { listInbox, confirmInbox, rejectInbox, previewInboxFile, detectType } fr
 import { analyzeSource } from "./analyze.js";
 import { suggestLinks } from "./suggest.js";
 import { previewImpact } from "./impact.js";
+import { executeIngest } from "./ingest.js";
 
 /**
  * Start a simple web UI for browsing and searching indexed docs.
@@ -242,6 +243,9 @@ export function startServer(index, bodies, port = 3000, files = []) {
   .btn-approve { background: #d4edda; color: #155724; font-weight: 600; }
   .btn-confirm { background: #d4edda; color: #155724; font-weight: 600; }
   .btn-reject { background: #f8d7da; color: #721c24; }
+  .btn-ingest { background: #007acc; color: #fff; font-weight: 600; }
+  .btn-ingest:disabled { opacity: 0.5; cursor: not-allowed; }
+  .ingest-result { margin-top: 0.5rem; padding: 0.5rem; background: #e8f4e8; border-radius: 6px; font-size: 0.85rem; display: none; }
   button:hover { opacity: 0.8; }
   button:disabled { opacity: 0.4; cursor: not-allowed; }
   .modal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 100; justify-content: center; align-items: center; }
@@ -439,8 +443,12 @@ export function startServer(index, bodies, port = 3000, files = []) {
           ? '<button class="btn-confirm" onclick="confirmInbox(' + i + ')">放行准入</button>' +
             '<button class="btn-reject" onclick="rejectInbox(' + i + ')">拒绝准入</button>'
           : (p.status === 'confirmed'
-            ? '<span style="color:#155724;font-size:0.8rem;">已放行 ' + (p.confirmedAt||'').slice(0,10) + '</span>'
+            ? '<button class="btn-ingest" onclick="ingestInbox(' + i + ')">执行摄入</button>' +
+              '<span style="color:#155724;font-size:0.8rem;margin-left:0.5rem;">已放行 ' + (p.confirmedAt||'').slice(0,10) + '</span>'
             : '<span style="color:#721c24;font-size:0.8rem;">' + (p.reason ? '原因: '+esc(p.reason.slice(0,50)) : '已拒绝') + '</span>');
+        const ingestResultDiv = p.status === 'confirmed'
+          ? '<div class="ingest-result" id="ingestResult-' + i + '" style="display:none"></div>'
+          : '';
         return '<div class="page">' +
           '<div class="info">' +
           '<div class="title">' + esc(p.filename) + ' ' + badge + '</div>' +
@@ -449,7 +457,9 @@ export function startServer(index, bodies, port = 3000, files = []) {
           '<div class="actions">' +
           '<button class="btn-view" onclick="previewInbox(' + i + ')">预览</button>' +
           actions +
-          '</div></div>';
+          '</div>' +
+          ingestResultDiv +
+          '</div>';
       }).join('');
     }
 
@@ -474,6 +484,55 @@ export function startServer(index, bodies, port = 3000, files = []) {
       });
       if (res.ok) { showToast('已拒绝：' + p.filename); loadInbox(); }
       else { showToast('拒绝失败'); }
+    }
+
+    async function ingestInbox(i) {
+      const p = inboxItems[i];
+      if (!confirm('执行摄入：' + p.filename + '\\n\\n这将创建 wiki 页面并归档源文件。确定继续？')) return;
+
+      // Disable all ingest buttons while running
+      const btns = document.querySelectorAll('.btn-ingest');
+      btns.forEach(b => b.disabled = true);
+
+      const resultDiv = document.getElementById('ingestResult-' + i);
+      if (resultDiv) {
+        resultDiv.style.display = 'block';
+        resultDiv.innerHTML = '⏳ 正在摄入...';
+      }
+
+      try {
+        const res = await fetch('/admin/inbox/ingest/' + encodeURIComponent(p.filename), {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ force: false })
+        });
+        const data = await res.json();
+
+        if (res.ok && data.ok) {
+          const lines = [];
+          lines.push('✅ 摄入完成！');
+          if (data.created && data.created.length > 0) {
+            lines.push('创建 ' + data.created.length + ' 个页面：');
+            data.created.forEach(c => lines.push('  · ' + c.title));
+          }
+          if (data.archivedPath) {
+            lines.push('归档：' + data.archivedPath);
+          }
+          if (resultDiv) resultDiv.innerHTML = lines.join('<br>');
+          showToast('摄入完成：' + p.filename);
+          setTimeout(() => loadInbox(), 1500);
+        } else {
+          const msg = data.skipped
+            ? '⚠ 跳过：' + (data.reason || '未知原因')
+            : '❌ 失败：' + (data.error || '未知错误');
+          if (resultDiv) resultDiv.innerHTML = msg;
+          showToast(msg);
+        }
+      } catch (err) {
+        if (resultDiv) resultDiv.innerHTML = '❌ 网络错误：' + err.message;
+        showToast('摄入请求失败');
+      } finally {
+        btns.forEach(b => b.disabled = false);
+      }
     }
 
     async function previewInbox(i) {
@@ -769,6 +828,35 @@ export function startServer(index, bodies, port = 3000, files = []) {
     } catch (err) {
       console.error(`Inbox impact error: ${err.message}`);
       res.status(500).json({ error: "Impact failed" });
+    }
+  });
+
+  app.post("/admin/inbox/ingest/:filename", async (req, res) => {
+    try {
+      const vaultPath = getVaultPath();
+      const { join } = await import("node:path");
+      const filename = decodeURIComponent(req.params.filename);
+      const filePath = join(vaultPath, "00_Inbox", filename);
+
+      // Check confirmed
+      const items = await listInbox(vaultPath, "confirmed");
+      if (!items.find((i) => i.filename === filename)) {
+        return res.status(400).json({ error: "Source not confirmed. Use '放行准入' first." });
+      }
+
+      const { force } = req.body || {};
+      const result = await executeIngest(filePath, vaultPath, index, bodies, {
+        dryRun: false,
+        force: force || false,
+      });
+
+      res.json({
+        ok: !result.skipped,
+        ...result,
+      });
+    } catch (err) {
+      console.error(`Inbox ingest error: ${err.message}`);
+      res.status(500).json({ error: "Ingest failed: " + err.message });
     }
   });
 
